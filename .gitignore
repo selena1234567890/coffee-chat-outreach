@@ -33,3 +33,6 @@ dist/
 
 # Personal operating guide (contains your own contacts/notes)
 CLAUDE.md
+
+# Claude Code settings for this computer only
+.claude/settings.local.json
