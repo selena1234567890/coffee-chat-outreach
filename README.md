@@ -20,6 +20,38 @@ contacted and who replied.
 
 ---
 
+## Coffee chats and referrals (two email types)
+
+This version adds **two email types**, each with its own template that **you write**:
+
+| `type` in CSV | Template | Resume attached? |
+|---|---|---|
+| `coffee_chat` | `templates/coffee_chat.txt` | no (by default) |
+| `referral` | `templates/referral.txt` | yes |
+
+```bash
+cp templates/coffee_chat.txt.example templates/coffee_chat.txt   # then write your own words
+cp templates/referral.txt.example templates/referral.txt
+```
+
+Each CSV row picks its template with the `type` column. Every other column can be used as
+a `{{blank}}` in your template (e.g. `first_name`, `company`, `their_role`, `connection`,
+`target_role`, `job_link`, `subject`). See `mailmerge_database.csv.example`.
+
+Safety checks added:
+- **Blank check** — if any `{{blank}}` a row's template uses is empty, nothing is sent and
+  the problem rows are listed.
+- **Unknown type** — a typo like `coffe_chat` stops the send instead of using the wrong email.
+- **People per company** — `[pacing].max_per_company` (default 3). Extra people stay in the
+  queue for later. You still never email the same person twice.
+- **Test send** — `outreach-send --test` sends the first 2 emails to **your own** address
+  (subject starts with `[TEST to …]`). Nothing is logged.
+
+Built on [internship-cold-email-kit](https://github.com/Mianmalol/internship-cold-email-kit)
+by Marco Li (MIT).
+
+---
+
 ## Contents
 - [The Overview](#the-60-second-mental-model)
 - [Requirements](#requirements)

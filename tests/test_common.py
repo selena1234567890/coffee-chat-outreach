@@ -68,7 +68,9 @@ def test_load_config_resolves_paths_against_config_dir(tmp_path):
 def test_load_config_defaults_when_missing(tmp_path):
     cfg = common.load_config(str(tmp_path / "nope.toml"))
     assert cfg["files"]["database"].endswith("mailmerge_database.csv")
-    assert cfg["pacing"]["batch_size"] == 14
+    assert cfg["pacing"]["batch_size"] == 10
+    assert cfg["pacing"]["max_per_company"] == 3
+    assert cfg["templates"] == {}
     assert cfg["email"]["smtp_host"] == "smtp.gmail.com"
 
 

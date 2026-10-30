@@ -16,6 +16,7 @@ Commands:
   outreach_cli.py followup        list silent contacts (cross-check via Gmail connector)
 """
 import argparse
+import collections
 import os
 import subprocess
 import sys
@@ -29,6 +30,10 @@ def _safe_rows(path):
     if not os.path.exists(path):
         return None, []
     return common.read_rows(path)
+
+
+def _company(r):
+    return (r.get("company") or "").strip().lower()
 
 
 def _sent_companies(sent_log):
@@ -45,10 +50,13 @@ def cmd_status(args, cfg):
     queue, db, sent_log = _paths(cfg)
     _, q_rows = _safe_rows(queue)
     _, db_rows = _safe_rows(db)
-    sent = _sent_companies(sent_log)
+    sent = common.sent_emails(sent_log) if os.path.exists(sent_log) else set()
     print("=== Outreach funnel ===")
-    print(f"  Sent (contacted):   {len(sent)}")
+    print(f"  Sent (people):      {len(sent)} at {len(_sent_companies(sent_log))} companies")
     print(f"  Staged (in DB):     {len(db_rows)}")
+    kinds = collections.Counter((r.get("type") or "").strip() or "default" for r in db_rows)
+    for kind, n in sorted(kinds.items()):
+        print(f"    {kind}: {n}")
     print(f"  Queue (backlog):    {len(q_rows)}")
     if not q_rows:
         print("\n  Backlog is dry -> run `find` and the internship-scout subagent.")
@@ -71,6 +79,9 @@ def cmd_setup(args, cfg):
 
     resume = cfg["files"]["resume"]
     print(f"Resume: {'OK ' + resume if os.path.exists(resume) else 'MISSING -> ' + resume}")
+    for kind, path in (cfg.get("templates") or {"default": cfg["files"]["template"]}).items():
+        status = "OK " if os.path.exists(path) else "MISSING -> copy the .example, then edit "
+        print(f"Template [{kind}]: {status}{path}")
 
     backend, ok, hint = common.secret_status(cfg["email"]["keychain_service"])
     print(f"Password: {'OK via ' + backend if ok else 'MISSING -> ' + hint}")
@@ -107,24 +118,30 @@ def cmd_stage(args, cfg):
     db_fields, db_rows = _safe_rows(db)
     fields = db_fields or q_fields
 
-    # Dedup by normalized email (the identity send.py enforces) AND by company.
+    # Dedup by normalized email (the identity send.py enforces), and cap how many
+    # people at one company are contacted ([pacing].max_per_company).
+    max_per_company = cfg["pacing"].get("max_per_company", 3)
     blk_emails = common.sent_emails(sent_log)
     blk_emails |= {common.normalize_email(r.get("contact_email")) for r in db_rows}
-    blk_companies = _sent_companies(sent_log)
-    blk_companies |= {(r.get("company") or "").strip().lower() for r in db_rows}
+    _, sent_rows = _safe_rows(sent_log)
+    per_company = collections.Counter(_company(r) for r in sent_rows + db_rows)
 
     def handled(r):
-        return (common.normalize_email(r.get("contact_email")) in blk_emails
-                or (r.get("company") or "").strip().lower() in blk_companies)
+        return common.normalize_email(r.get("contact_email")) in blk_emails
 
-    to_move, leftover, dropped = [], [], []
+    def company_full(r):
+        return bool(_company(r)) and per_company[_company(r)] >= max_per_company
+
+    to_move, leftover, dropped, held = [], [], [], []
     for r in q_rows:
         if handled(r):
             dropped.append(r)  # already sent or staged -> remove from queue
+        elif company_full(r):
+            held.append(r)     # company at its cap -> keep in queue, don't stage
         elif len(to_move) < n:
             to_move.append(r)
             blk_emails.add(common.normalize_email(r.get("contact_email")))
-            blk_companies.add((r.get("company") or "").strip().lower())
+            per_company[_company(r)] += 1
         else:
             leftover.append(r)  # pending beyond this batch -> keep in queue
 
@@ -138,12 +155,17 @@ def cmd_stage(args, cfg):
     # If interrupted between the two writes, the email/company dedup above plus the
     # idempotency check in send.py mean nothing double-sends; backups aid recovery.
     common.write_db(db, fields, db_rows + to_move)
-    common.write_db(queue, q_fields, leftover)
+    common.write_db(queue, q_fields, held + leftover)
 
     print(f"Staged {len(to_move)} -> {os.path.basename(db)}; "
-          f"dropped {len(dropped)} already-handled; {len(leftover)} left in queue.")
+          f"dropped {len(dropped)} already-handled; {len(held) + len(leftover)} left in queue.")
+    if held:
+        print(f"  ({len(held)} held back: their company already has {max_per_company} "
+              f"contacted; raise [pacing].max_per_company to include them.)")
     for r in to_move:
-        print(f"  + {r.get('company')} <{r.get('contact_email')}>")
+        kind = (r.get("type") or "").strip()
+        tag = f"  [{kind}]" if kind else ""
+        print(f"  + {r.get('company')} <{r.get('contact_email')}>{tag}")
     print("\nNext: `outreach_cli.py preview`, then `python3 send.py --send` once you approve.")
 
 

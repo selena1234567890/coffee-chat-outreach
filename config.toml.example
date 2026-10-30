@@ -21,8 +21,15 @@ sent_log = "sent_log.csv"
 queue = "outreach_queue.csv"
 resume = "resume.pdf"
 
+# One template per email type. Each row's `type` column (in the CSV) picks one.
+# Copy the .example files in templates/ and write your own wording.
+[templates]
+coffee_chat = "templates/coffee_chat.txt"
+referral = "templates/referral.txt"
+
 [pacing]
-batch_size = 14            # cold emails per day; do not blast
+batch_size = 10            # cold emails per day; do not blast
+max_per_company = 3        # most people to contact at one company
 followup_after_days = 6    # mark a silent contact follow-up-able after this many days
 
 [outreach]

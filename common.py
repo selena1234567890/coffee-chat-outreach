@@ -44,12 +44,12 @@ DEFAULT_FILES = {
     "queue": "outreach_queue.csv",
     "resume": "resume.pdf",
 }
-DEFAULT_PACING = {"batch_size": 14, "followup_after_days": 6}
+DEFAULT_PACING = {"batch_size": 10, "followup_after_days": 6, "max_per_company": 3}
 
 # Canonical sent-log schema. Existing logs may have only the first columns; that's
 # tolerated on read and extended by `outreach migrate`.
 SENT_LOG_FIELDS = ["contact_email", "contact_name", "company", "role",
-                   "subject", "note", "sent_at", "last_reply"]
+                   "subject", "note", "type", "sent_at", "last_reply"]
 
 # Embedded so `outreach setup` can scaffold a config without a shipped example file
 # (works for any install mode, editable or wheel).
@@ -70,9 +70,16 @@ sent_log = "sent_log.csv"
 queue = "outreach_queue.csv"
 resume = "resume.pdf"
 
+# One template per email type. Each row's `type` column picks its template.
+# Leave this section out to use the single [files].template for every row.
+[templates]
+coffee_chat = "templates/coffee_chat.txt"
+referral = "templates/referral.txt"
+
 [pacing]
-batch_size = 14            # cold emails per day; do not blast
+batch_size = 10            # cold emails per day; do not blast
 followup_after_days = 6
+max_per_company = 3        # most people to contact at one company
 
 [outreach]
 # The one thing you specify: what kind of internships/roles to target.
@@ -119,9 +126,12 @@ def load_config(path=None):
     email_cfg = {**DEFAULT_EMAIL, **data.get("email", {})}
     files_cfg = {k: resolve(v, workspace)
                  for k, v in {**DEFAULT_FILES, **data.get("files", {})}.items()}
+    templates_cfg = {k.strip().lower(): resolve(v, workspace)
+                     for k, v in data.get("templates", {}).items()}
     return {
         "email": email_cfg,
         "files": files_cfg,
+        "templates": templates_cfg,
         "pacing": {**DEFAULT_PACING, **data.get("pacing", {})},
         "outreach": data.get("outreach", {}),
         "workspace": workspace,
@@ -138,13 +148,35 @@ def validate_for_send(cfg):
         int(em["smtp_port"])
     except (KeyError, ValueError, TypeError):
         raise ValueError(f"[email].smtp_port must be an integer, got {em.get('smtp_port')!r}")
-    template = cfg["files"]["template"]
-    if not os.path.exists(template):
-        raise ValueError(f"template not found: {template}")
-    headers, _ = load_template(template)
-    missing = [h for h in ("TO", "SUBJECT") if h not in headers]
-    if missing:
-        raise ValueError(f"template {template} missing header(s): {', '.join(missing)}")
+    for template in template_paths(cfg):
+        if not os.path.exists(template):
+            raise ValueError(f"template not found: {template}")
+        headers, _ = load_template(template)
+        missing = [h for h in ("TO", "SUBJECT") if h not in headers]
+        if missing:
+            raise ValueError(f"template {template} missing header(s): {', '.join(missing)}")
+
+
+def template_paths(cfg):
+    """Every template this config can use: the [templates] map, else [files].template."""
+    return list((cfg.get("templates") or {}).values()) or [cfg["files"]["template"]]
+
+
+def template_for(row, cfg):
+    """Pick the template path for a row from its `type` column.
+
+    With a [templates] map, the row's type must be one of its keys (ValueError
+    otherwise), so a typo never silently falls back to the wrong email. Without
+    one, every row uses [files].template.
+    """
+    templates = cfg.get("templates") or {}
+    if not templates:
+        return cfg["files"]["template"]
+    kind = (row.get("type") or "").strip().lower()
+    if kind not in templates:
+        raise ValueError(f"type {kind or '(blank)'!r} is not one of: "
+                         f"{', '.join(sorted(templates))}")
+    return templates[kind]
 
 
 def backup(path, backup_dir=None):
@@ -338,6 +370,17 @@ def body_text(msg):
 def render(text, row):
     """Replace every {{column}} with the row value."""
     return re.sub(r"\{\{(\w+)\}\}", lambda m: row.get(m.group(1), m.group(0)), text)
+
+
+def placeholders(text):
+    """Names of every {{column}} used in `text`, in first-seen order."""
+    return list(dict.fromkeys(re.findall(r"\{\{(\w+)\}\}", text)))
+
+
+def missing_fields(row, headers, body):
+    """Placeholders in the template (headers + body) that this row leaves blank."""
+    used = placeholders("\n".join(headers.values()) + "\n" + body)
+    return [name for name in used if not (row.get(name) or "").strip()]
 
 
 def load_template(template_path):

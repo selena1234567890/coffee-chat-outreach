@@ -1,0 +1,15 @@
+TO: {{contact_email}}
+SUBJECT: {{subject}}
+FROM: Your Name <you@gmail.com>
+ATTACHMENT: resume.pdf
+
+Hi {{first_name}},
+
+<Write your own referral email here. Example:>
+I'm Your Name, a <year> studying <major> at <school>. {{connection}}. I'm applying for the {{target_role}} role at {{company}} ({{job_link}}) and wanted to ask if you'd be comfortable referring me.
+
+I've attached my resume. Happy to send anything else that would make it easy for you.
+
+Thank you so much,
+Your Name
+your-linkedin

@@ -5,6 +5,7 @@
 
 # Your real working files (your info + real recipient emails)
 mailmerge_template.txt
+templates/*.txt
 mailmerge_database.csv
 config.toml
 sent_log.csv
@@ -22,6 +23,7 @@ token.json
 .DS_Store
 
 # Python
+.venv/
 __pycache__/
 *.pyc
 .pytest_cache/

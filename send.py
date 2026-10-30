@@ -18,6 +18,11 @@ Usage:
   python3 send.py            # dry-run: render and preview every email, send nothing
   python3 send.py --send     # preview, then ask 'Send N emails? [y/N]', then send
   python3 send.py --send --yes   # skip the confirmation prompt (hands-off)
+  python3 send.py --test     # send the first 2 emails to YOURSELF only (no log)
+
+Each row's `type` column (e.g. coffee_chat / referral) picks its template from the
+[templates] section of config.toml. A row with any blank {{placeholder}} blocks the
+whole batch, so nobody ever gets "Hi ,".
 
 One-time Keychain setup (stores the Gmail APP password, encrypted, not on disk):
   security add-generic-password -s mailmerge-gmail -a "$USER" -w
@@ -29,6 +34,8 @@ import sys
 from email.message import EmailMessage
 
 import common
+
+TEST_COUNT = 2  # how many emails --test sends to yourself
 
 
 def build_message(row, headers, body, base_dir):
@@ -49,18 +56,43 @@ def build_message(row, headers, body, base_dir):
     return msg
 
 
+def send_test(cfg, plan, workspace):
+    """Send rendered emails to the sender's OWN address, marked [TEST].
+
+    Nothing is logged and the database is untouched, so the real send still
+    happens later. Use it to see exactly what a recipient will see.
+    """
+    try:
+        common.validate_for_send(cfg)
+    except ValueError as e:
+        sys.exit(f"ERROR: {e}")
+    em = cfg["email"]
+    me = em["address"]
+    password = common.get_password(em["keychain_service"])
+    with common.smtp_session(em["smtp_host"], int(em["smtp_port"]), me, password) as smtp:
+        for r, headers, body in plan:
+            msg = build_message(r, headers, body, workspace)
+            real_to = msg["To"]
+            msg.replace_header("To", me)
+            msg.replace_header("Subject", f"[TEST to {real_to}] {msg['Subject']}")
+            smtp.send_message(msg)
+            print(f"  test sent -> {me} (would go to {real_to})")
+    print("\nCheck your inbox. Nothing was logged; run --send when it looks right.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", help="config path (default ./config.toml or $OUTREACH_CONFIG)")
     ap.add_argument("--send", action="store_true", help="actually send (default: dry-run)")
     ap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    ap.add_argument("--test", action="store_true",
+                    help=f"send the first {TEST_COUNT} emails to your own address only")
     args = ap.parse_args()
 
     cfg = common.load_config(common.find_config(args.config))
     workspace = cfg["workspace"]
     DB = cfg["files"]["database"]
     LOG = cfg["files"]["sent_log"]
-    TEMPLATE = cfg["files"]["template"]
 
     fieldnames, rows = common.read_rows(DB)
     if not rows:
@@ -96,20 +128,49 @@ def main():
         print("Nothing new to send.")
         return
 
-    if not os.path.exists(TEMPLATE):
-        sys.exit(f"ERROR: template not found: {TEMPLATE}")
-    headers, body = common.load_template(TEMPLATE)
-    missing = [h for h in ("TO", "SUBJECT") if h not in headers]
-    if missing:
-        sys.exit(f"ERROR: template {TEMPLATE} missing header(s): {', '.join(missing)}")
-
-    print(f"=== {len(rows)} email(s) staged ===\n")
+    # Pick each row's template (by `type`) and check every placeholder is filled.
+    # Any problem blocks the whole batch: fix the CSV, then re-run.
+    loaded, plan, problems = {}, [], []
     for r in rows:
+        who = r.get("contact_email")
+        try:
+            path = common.template_for(r, cfg)
+        except ValueError as e:
+            problems.append(f"{who}: {e}")
+            continue
+        if path not in loaded:
+            if not os.path.exists(path):
+                sys.exit(f"ERROR: template not found: {path}")
+            headers, body = common.load_template(path)
+            missing = [h for h in ("TO", "SUBJECT") if h not in headers]
+            if missing:
+                sys.exit(f"ERROR: template {path} missing header(s): {', '.join(missing)}")
+            loaded[path] = (headers, body)
+        headers, body = loaded[path]
+        blank = common.missing_fields(r, headers, body)
+        if blank:
+            problems.append(f"{who}: blank {', '.join(blank)}")
+        plan.append((r, headers, body))
+    if problems:
+        print(f"ERROR: {len(problems)} row(s) need fixing in {os.path.basename(DB)}; "
+              f"nothing sent:")
+        for p in problems:
+            print(f"  - {p}")
+        sys.exit(1)
+
+    print(f"=== {len(plan)} email(s) staged ===\n")
+    for r, headers, _ in plan:
+        kind = (r.get("type") or "").strip() or "default"
+        print(f"  [{kind}]")
         print(f"  TO:      {common.render(headers['TO'], r)}")
         print(f"  SUBJECT: {common.render(headers['SUBJECT'], r)}\n")
 
+    if args.test:
+        send_test(cfg, plan[:TEST_COUNT], workspace)
+        return
+
     if not args.send:
-        print("Dry-run only. Re-run with --send to deliver.")
+        print("Dry-run only. Re-run with --test to email yourself, or --send to deliver.")
         return
 
     if not args.yes:
@@ -137,20 +198,22 @@ def main():
     # Transactional send: archive each success IMMEDIATELY and rewrite the DB to
     # only the not-yet-sent rows, so a crash mid-batch can never (a) lose a row we
     # already sent or (b) leave a sent row staged for an accidental re-send.
+    log_fields = common.SENT_LOG_FIELDS + [f for f in fieldnames
+                                           if f not in common.SENT_LOG_FIELDS]
     remaining, failed = list(rows), []
     with common.smtp_session(host, port, username, password) as smtp:
-        for r in rows:
+        for r, headers, body in plan:
             try:
                 smtp.send_message(build_message(r, headers, body, workspace))
             except Exception as e:
-                print(f"  FAILED -> {r['contact_email']} ({r['company']}): {e}")
+                print(f"  FAILED -> {r['contact_email']} ({r.get('company')}): {e}")
                 failed.append(r)
                 continue
             # Sent successfully. A failure recording it is NOT a send failure: we
             # must stop immediately rather than keep sending into an inconsistent
             # state. The idempotency check above makes a later retry safe.
             try:
-                common.archive(LOG, common.SENT_LOG_FIELDS,
+                common.archive(LOG, log_fields,
                                [{**r, "sent_at": common.utcnow_iso()}])
                 remaining.remove(r)
                 common.write_db(DB, fieldnames, remaining)
@@ -158,7 +221,7 @@ def main():
                 sys.exit(f"\n  CRITICAL: sent to {r['contact_email']} but failed to "
                          f"record it: {e}\n  Aborting batch. Reconcile {os.path.basename(LOG)} "
                          f"and {os.path.basename(DB)} before resending.")
-            print(f"  sent -> {r['contact_email']} ({r['company']})")
+            print(f"  sent -> {r['contact_email']} ({r.get('company')})")
 
     sent_n = len(rows) - len(failed)
     if sent_n:
