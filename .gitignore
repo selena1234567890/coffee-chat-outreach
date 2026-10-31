@@ -36,3 +36,6 @@ CLAUDE.md
 
 # Claude Code settings for this computer only
 .claude/settings.local.json
+
+# Real people you know (private); the .example file is committed instead
+data/do_not_contact.csv

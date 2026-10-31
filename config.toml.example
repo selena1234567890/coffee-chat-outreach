@@ -20,6 +20,8 @@ database = "mailmerge_database.csv"
 sent_log = "sent_log.csv"
 queue = "outreach_queue.csv"
 resume = "resume.pdf"
+targets = "data/target_companies.csv"        # company, domain, tier (you edit)
+do_not_contact = "data/do_not_contact.csv"   # people never to cold email (private)
 
 # One template per email type. Each row's `type` column (in the CSV) picks one.
 # Copy the .example files in templates/ and write your own wording.
@@ -39,6 +41,7 @@ mid = 5
 large = 7                  # large_from employees or more (Meta, Amazon...)
 unknown = 4                # company_size is blank
 small_below = 1000
+min_employees = 1000       # skip companies smaller than this entirely (0 = no floor)
 large_from = 10000
 
 # Which email a person gets when their `type` cell is blank. A type you fill in

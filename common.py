@@ -44,11 +44,13 @@ DEFAULT_FILES = {
     "sent_log": "sent_log.csv",
     "queue": "outreach_queue.csv",
     "resume": "resume.pdf",
+    "targets": "data/target_companies.csv",
+    "do_not_contact": "data/do_not_contact.csv",
 }
 DEFAULT_PACING = {"batch_size": 14, "followup_after_days": 6}
 # Most people to contact per company, by company size (employee count).
 DEFAULT_COMPANY_LIMITS = {"small": 3, "mid": 5, "large": 7, "unknown": 4,
-                          "small_below": 1000, "large_from": 10000}
+                          "small_below": 1000, "large_from": 10000, "min_employees": 1000}
 # Which email a person gets when their `type` cell is blank.
 DEFAULT_ROUTING = {"coffee_chat_min_years": 3,
                    "coffee_chat_titles": ["lead", "manager", "director", "principal",
@@ -81,6 +83,8 @@ database = "mailmerge_database.csv"
 sent_log = "sent_log.csv"
 queue = "outreach_queue.csv"
 resume = "resume.pdf"
+targets = "data/target_companies.csv"        # company, domain, tier (you edit)
+do_not_contact = "data/do_not_contact.csv"   # people never to cold email (private)
 
 # One template per email type. Each row's `type` column picks its template.
 # Leave this section out to use the single [files].template for every row.
@@ -100,6 +104,7 @@ mid = 5
 large = 7                  # large_from employees or more (Meta, Amazon...)
 unknown = 4                # company_size is blank
 small_below = 1000
+min_employees = 1000       # skip companies smaller than this entirely (0 = no floor)
 large_from = 10000
 
 # Which email a person gets when their `type` cell is blank. A type you fill in
@@ -249,6 +254,101 @@ def company_limit(row, cfg):
     if size >= lim["large_from"]:
         return lim["large"]
     return lim["mid"]
+
+
+UNKNOWN_TIER = 4  # companies not on the target list sort after tier 3
+
+
+def _norm(text):
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def email_domain(addr):
+    """'Jane@Mail.Meta.com' -> 'mail.meta.com' ('' if no @)."""
+    return normalize_email(addr).rpartition("@")[2]
+
+
+def _csv_rows(path):
+    if not path or not os.path.exists(path):
+        return []
+    return read_rows(path)[1]
+
+
+@functools.lru_cache(maxsize=None)
+def load_targets(path):
+    """Map company name and domain (lowercased) -> tier, from target_companies.csv."""
+    out = {}
+    for r in _csv_rows(path):
+        tier = (r.get("tier") or "").strip()
+        if not tier.isdigit():
+            continue
+        for key in (_norm(r.get("company")), _norm(r.get("domain"))):
+            if key:
+                out[key] = int(tier)
+    return out
+
+
+def company_tier(row, cfg):
+    """1 = big tech, 2 = finance/banking/consulting, 3 = other big companies.
+
+    Uses the row's own `tier` if filled in, else looks the company up in the target
+    list by name, then by email domain (sub.domain.com also matches domain.com).
+    Companies not on the list get UNKNOWN_TIER, so they sort last.
+    """
+    own = (row.get("tier") or "").strip()
+    if own.isdigit():
+        return int(own)
+    targets = load_targets((cfg.get("files") or {}).get("targets"))
+    if _norm(row.get("company")) in targets:
+        return targets[_norm(row.get("company"))]
+    parts = email_domain(row.get("contact_email")).split(".")
+    for i in range(len(parts) - 1):
+        if ".".join(parts[i:]) in targets:
+            return targets[".".join(parts[i:])]
+    return UNKNOWN_TIER
+
+
+def too_small(row, cfg):
+    """True if the company's known size is under [company_limits].min_employees.
+
+    Unknown size is never "too small" (it uses the `unknown` per-company limit).
+    """
+    lim = {**DEFAULT_COMPANY_LIMITS, **(cfg.get("company_limits") or {})}
+    size = company_size(row)
+    return size is not None and size < lim["min_employees"]
+
+
+def has_open_roles(row):
+    """True if the `open_intern_roles` column says yes."""
+    return (row.get("open_intern_roles") or "").strip().lower() in {"yes", "y", "true", "1"}
+
+
+@functools.lru_cache(maxsize=None)
+def _do_not_contact_list(path):
+    return tuple(r for r in _csv_rows(path)
+                 if any((r.get(k) or "").strip() for k in ("contact_email", "first_name")))
+
+
+def on_do_not_contact(row, cfg):
+    """True if this person is on data/do_not_contact.csv.
+
+    A list entry matches by email, or by first name + (last name if given) +
+    (company if given). Company names match loosely ("JPMorgan" ~ "JPMorgan Chase").
+    """
+    email = normalize_email(row.get("contact_email"))
+    first, last = _norm(row.get("first_name")), _norm(row.get("last_name"))
+    company = _norm(row.get("company"))
+    for d in _do_not_contact_list((cfg.get("files") or {}).get("do_not_contact")):
+        d_email = normalize_email(d.get("contact_email"))
+        if d_email and d_email == email:
+            return True
+        d_first, d_last, d_company = (_norm(d.get(k)) for k in ("first_name", "last_name",
+                                                                  "company"))
+        same_company = not d_company or (company and (d_company in company
+                                                      or company in d_company))
+        if d_first and d_first == first and d_last in ("", last) and same_company:
+            return True
+    return False
 
 
 def years_at_company(row, today=None):

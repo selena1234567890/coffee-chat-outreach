@@ -77,7 +77,9 @@ def _print_reply_rates(sent_log, cfg):
         return
     sent, replied = collections.Counter(), collections.Counter()
     for r in rows:
-        groups = [f"type: {(r.get('type') or '').strip() or 'default'}"]
+        tier = common.company_tier(r, cfg)
+        groups = [f"type: {(r.get('type') or '').strip() or 'default'}",
+                  "tier: " + ("not listed" if tier == common.UNKNOWN_TIER else str(tier))]
         groups += [f"priority: {g}" for g in common.priority_groups(r, cfg)] or ["priority: none"]
         for g in groups:
             sent[g] += 1
@@ -141,13 +143,14 @@ def _sent_today(r):
 def cmd_stage(args, cfg):
     """Move today's batch from the queue into the database, following the rules:
 
-    1. skip anyone already sent or staged (by email)
-    2. fill a blank `type` ([routing]) and add surname tags ([priority.surname_lists])
-    3. priority people first ([priority]), otherwise queue order
-    4. at most company_limit people per company ([company_limits], by size)
-    5. at most [daily] emails per type today (counting staged + sent today)
-    6. at most N in total (-n, default [pacing].batch_size)
-    People skipped by 4-6 stay in the queue for another day.
+    1. remove anyone already sent or staged (by email), or on the do-not-contact list
+    2. skip companies under [company_limits].min_employees
+    3. fill a blank `type` ([routing]), `tier` (target list) and surname tags
+    4. order: tier (1 first) -> open intern roles first -> priority groups -> queue order
+    5. at most company_limit people per company ([company_limits], by size)
+    6. at most [daily] emails per type today (counting staged + sent today)
+    7. at most N in total (-n, default [pacing].batch_size)
+    People skipped by 2 and 5-7 stay in the queue (for another day, or a changed setting).
     """
     queue, db, sent_log = _paths(cfg)
     n = args.n if args.n is not None else cfg["pacing"]["batch_size"]
@@ -161,7 +164,7 @@ def cmd_stage(args, cfg):
         return
     db_fields, db_rows = _safe_rows(db)
     fields = list(db_fields or q_fields)
-    for extra in ("type", "priority_tags"):
+    for extra in ("type", "tier", "priority_tags"):
         if extra not in fields:
             fields.append(extra)
 
@@ -174,25 +177,33 @@ def cmd_stage(args, cfg):
         common.pick_type(r, cfg) for r in db_rows + [r for r in sent_rows if _sent_today(r)])
 
     def prepared(r):
-        out = dict(r, type=common.pick_type(r, cfg))
+        out = dict(r, type=common.pick_type(r, cfg), tier=str(common.company_tier(r, cfg)))
         out["priority_tags"] = ", ".join(sorted(common.auto_tags(r, cfg)))
         return out
 
-    # Highest priority first; sorted() is stable, so ties keep queue order.
-    ranked = sorted(((r, prepared(r)) for r in q_rows),
-                    key=lambda pair: -common.priority_score(pair[1], cfg))
-    to_move, gone = [], set()
-    dropped = company_full = type_full = 0
+    def rank(pair):
+        r = pair[1]
+        return (int(r["tier"]), not common.has_open_roles(r), -common.priority_score(r, cfg))
+
+    # Best first; sorted() is stable, so ties keep queue order.
+    ranked = sorted(((r, prepared(r)) for r in q_rows), key=rank)
+    to_move, gone, waiting = [], set(), collections.Counter()
+    dropped, blocked = 0, []
     for orig, r in ranked:
         email = common.normalize_email(r.get("contact_email"))
         kind = r["type"]
         if email in blk_emails:
             dropped += 1                     # already sent or staged -> remove from queue
             gone.add(id(orig))
+        elif common.on_do_not_contact(r, cfg):
+            blocked.append(r)                # on the do-not-contact list -> remove
+            gone.add(id(orig))
+        elif common.too_small(r, cfg):
+            waiting["small"] += 1            # under min_employees -> stays in queue
         elif _company(r) and per_company[_company(r)] >= common.company_limit(r, cfg):
-            company_full += 1                # company at its limit -> stays in queue
+            waiting["company"] += 1          # company at its limit -> stays in queue
         elif kind in daily and used_today[kind] >= daily[kind]:
-            type_full += 1                   # today's limit for this type -> stays
+            waiting["type"] += 1             # today's limit for this type -> stays
         elif len(to_move) < n:
             to_move.append(r)
             gone.add(id(orig))
@@ -201,9 +212,9 @@ def cmd_stage(args, cfg):
             used_today[kind] += 1
     leftover = [r for r in q_rows if id(r) not in gone]  # original order, unchanged
 
-    if not to_move and not dropped:
+    if not to_move and not dropped and not blocked:
         print("Nothing new to stage today.")
-        _print_waiting(company_full, type_full, used_today, daily)
+        _print_waiting(waiting, used_today, daily)
         return
 
     common.backup(queue)
@@ -219,18 +230,30 @@ def cmd_stage(args, cfg):
     for r in to_move:
         groups = common.priority_groups(r, cfg)
         star = f"  * {', '.join(groups)}" if groups else ""
-        print(f"  + [{r['type']}] {r.get('company')} <{r.get('contact_email')}>{star}")
-    _print_waiting(company_full, type_full, used_today, daily)
+        tier = "T?" if int(r["tier"]) == common.UNKNOWN_TIER else f"T{r['tier']}"
+        roles = " open-roles" if common.has_open_roles(r) else ""
+        print(f"  + {tier} [{r['type']}] {r.get('company')} <{r.get('contact_email')}>"
+              f"{roles}{star}")
+    for r in blocked:
+        print(f"  x removed (do-not-contact list): {r.get('first_name')} {r.get('last_name')}"
+              f" at {r.get('company')}")
+    _print_waiting(waiting, used_today, daily)
     print("\nNext: `outreach preview`, then `outreach-send --test`, then `outreach-send --send`.")
 
 
-def _print_waiting(company_full, type_full, used_today, daily):
+WAITING_REASONS = {
+    "small": "company is under min_employees ([company_limits])",
+    "company": "their company is at its limit ([company_limits])",
+    "type": "today's limit for their type is used up ([daily])",
+}
+
+
+def _print_waiting(waiting, used_today, daily):
     today = ", ".join(f"{k} {used_today[k]}/{v}" for k, v in sorted(daily.items()))
     print(f"\nToday so far: {today}")
-    if company_full:
-        print(f"  {company_full} waiting: their company is at its limit ([company_limits]).")
-    if type_full:
-        print(f"  {type_full} waiting: today's limit for their type is used up ([daily]).")
+    for reason, text in WAITING_REASONS.items():
+        if waiting[reason]:
+            print(f"  {waiting[reason]} waiting: {text}.")
 
 
 def cmd_preview(args, cfg):

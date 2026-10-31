@@ -104,11 +104,13 @@ def main():
     # never send the SAME address twice within one batch (case/whitespace-insensitive).
     already = common.sent_emails(LOG)
     seen, fresh = set(), []
-    n_sent = n_dup = n_blank = 0
+    n_sent = n_dup = n_blank = n_dnc = 0
     for r in rows:
         em = common.normalize_email(r.get("contact_email"))
         if not em:
             n_blank += 1
+        elif common.on_do_not_contact(r, cfg):
+            n_dnc += 1
         elif em in already:
             n_sent += 1
         elif em in seen:
@@ -118,10 +120,11 @@ def main():
             fresh.append(r)
     for label, n in (("already in the sent log", n_sent),
                      ("duplicated within this batch", n_dup),
-                     ("missing a contact_email", n_blank)):
+                     ("missing a contact_email", n_blank),
+                     ("on the do-not-contact list", n_dnc)):
         if n:
             print(f"Skipping {n} row(s) {label}.")
-    if n_sent or n_dup or n_blank:
+    if n_sent or n_dup or n_blank or n_dnc:
         print()
     rows = fresh
     if not rows:

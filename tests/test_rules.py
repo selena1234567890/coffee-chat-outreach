@@ -104,7 +104,8 @@ def test_company_limit_by_size(tmp_path):
 def test_stage_allows_more_people_at_big_companies(tmp_path):
     big = [_person(f"m{i}@meta.com", company="Meta", company_size="70000") for i in range(9)]
     small = [_person(f"s{i}@tiny.io", company="Tiny", company_size="500") for i in range(5)]
-    cfg = _cfg(tmp_path, daily={"referral": 50})
+    cfg = _cfg(tmp_path, daily={"referral": 50},
+               company_limits={**common.DEFAULT_COMPANY_LIMITS, "min_employees": 0})
     staged, left = _stage(cfg, big + small)
     count = {c: sum(r["company"] == c for r in staged) for c in ("Meta", "Tiny")}
     assert count == {"Meta": 7, "Tiny": 3}
@@ -114,7 +115,8 @@ def test_stage_allows_more_people_at_big_companies(tmp_path):
 def test_already_sent_people_count_toward_company_limit(tmp_path):
     sent = [_person(f"old{i}@tiny.io", company="Tiny", company_size="500") for i in range(2)]
     queue = [_person(f"new{i}@tiny.io", company="Tiny", company_size="500") for i in range(3)]
-    staged, _ = _stage(_cfg(tmp_path), queue, sent=sent)
+    cfg = _cfg(tmp_path, company_limits={**common.DEFAULT_COMPANY_LIMITS, "min_employees": 0})
+    staged, _ = _stage(cfg, queue, sent=sent)
     assert len(staged) == 1  # limit 3, 2 already emailed
 
 

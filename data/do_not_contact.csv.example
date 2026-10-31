@@ -1,0 +1,4 @@
+first_name,last_name,company,contact_email,note
+Jane,Doe,Example Co,,warm contact on WeChat
+Jordan,,Example Bank,,first name + company is enough
+,,,someone@example.com,or just an email

@@ -53,17 +53,21 @@ Safety checks added:
 | Rule | Setting | Default |
 |---|---|---|
 | Email type, when `type` is blank | `[routing]` | `coffee_chat` if 3+ years at the company (`start_date`) or a lead / manager / director / principal / staff / head `title`; otherwise `referral` |
-| Who goes first | `[priority]` | matching `school` (e.g. Emory) or a tag in `priority_tags` |
+| Order (who goes first) | target list, `[priority]` | **tier** (1 big tech → 2 finance/banking/consulting → 3 other big companies → not listed), then **open intern roles** (`open_intern_roles = yes`), then matching `school` (e.g. Emory) or a tag in `priority_tags` |
+| Company tiers | `data/target_companies.csv` | you edit it: `company, domain, tier`; matched by company name or email domain. A `tier` typed in the row wins |
+| Smallest company | `[company_limits].min_employees` | 1,000: smaller companies are skipped (they stay in the queue) |
+| Never cold email | `data/do_not_contact.csv` | people you already know: removed at `stage` and skipped at send. Match by email, or first name (+ last name) (+ company). Private: not committed; see the `.example` |
 | Automatic tags | `[priority.surname_lists]` | `last_name` found in `data/chinese_surnames.txt` → `chinese` tag |
-| People per company | `[company_limits]` | 3 if under 1,000 employees, 5 if 1,000–9,999, 7 if 10,000+, 4 if `company_size` is blank |
+| People per company | `[company_limits]` | 5 if 1,000–9,999 employees, 7 if 10,000+, 4 if `company_size` is blank (3 if under 1,000, if you lower the floor) |
 | Emails per day | `[daily]` | 6 coffee chats + 8 referrals (counts what's staged and sent today) |
 
 People held back by a limit stay in the queue for another day. A `type` you fill in by hand
-always wins. `outreach status` shows reply rates by type and priority group, so you can tune
+always wins. `outreach status` shows reply rates by type, tier and priority group, so you can tune
 the numbers after a week or two.
 
 Extra CSV columns the rules read: `last_name`, `company_size`, `title`, `start_date`
-(`YYYY-MM-DD`, `YYYY-MM` or `YYYY`), `school`, `priority_tags`, `linkedin_url`.
+(`YYYY-MM-DD`, `YYYY-MM` or `YYYY`), `school`, `priority_tags`, `tier`, `open_intern_roles`,
+`linkedin_url`.
 
 ---
 
