@@ -166,7 +166,9 @@ def main():
         kind = (r.get("type") or "").strip() or "default"
         print(f"  [{kind}]")
         print(f"  TO:      {common.render(headers['TO'], r)}")
-        print(f"  SUBJECT: {common.render(headers['SUBJECT'], r)}\n")
+        print(f"  SUBJECT: {common.render(headers['SUBJECT'], r)}")
+        common.print_check_line(r, indent="  ")
+        print()
 
     if args.test:
         send_test(cfg, plan[:TEST_COUNT], workspace)

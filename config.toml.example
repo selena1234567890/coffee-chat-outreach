@@ -56,6 +56,26 @@ coffee_chat_titles = ["lead", "manager", "director", "principal", "staff", "head
 coffee_chat = 6
 referral = 8
 
+# What the contact finder (Agent 1) searches for in Apollo. Apollo also matches
+# similar titles, so combinations like "Data Scientist, AI" are included.
+[search]
+titles = ["Data Scientist", "Data Analyst", "Machine Learning Engineer", "AI Engineer",
+          "Applied Scientist", "Research Scientist", "Data Engineer", "Analytics Engineer",
+          "Business Intelligence Analyst", "Product Analyst", "Decision Scientist",
+          "MLOps Engineer"]
+manager_titles = true        # also search managers of these roles
+locations = ["United States"]
+max_credits_per_run = 25     # Apollo credits (1 per email found); the agent asks first
+required_email_status = "verified"   # only add people whose email Apollo verified
+
+# Share of each day's emails per company tier (percent). Every tier with a share
+# above 0 gets at least 1 a day; slots a tier can't fill go to the best people left.
+# Compare reply rates by tier in `outreach status` and adjust.
+[tier_share]
+1 = 60                     # big tech
+2 = 30                     # finance / banking / consulting
+3 = 10                     # other big companies
+
 # Who gets staged first: a matching `school`, or a tag in `priority_tags`.
 [priority]
 schools = ["Emory"]

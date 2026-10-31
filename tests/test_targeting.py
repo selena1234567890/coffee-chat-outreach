@@ -4,6 +4,7 @@ open intern roles first, and the do-not-contact list (at stage and at send).
 Hermetic: temp CSVs, a fake SMTP, no network or account.
 """
 import argparse
+import collections
 import contextlib
 import datetime
 import os
@@ -193,3 +194,44 @@ def test_status_shows_reply_rates_by_tier(tmp_path, capsys):
     outreach_cli.cmd_status(argparse.Namespace(), cfg)
     out = capsys.readouterr().out
     assert "tier: 1" in out and "tier: 3" in out
+
+
+# --- daily share per tier ([tier_share]) ---------------------------------------
+
+def _mixed_queue(t1, t2, t3):
+    return ([_person(f"g{i}@google.com") for i in range(t1)]
+            + [_person(f"c{i}@capitalone.com") for i in range(t2)]
+            + [_person(f"p{i}@publix.com") for i in range(t3)])
+
+
+def _tiers(staged):
+    return collections.Counter(r["tier"] for r in staged)
+
+
+def test_each_tier_gets_its_share(tmp_path):
+    cfg = _cfg(tmp_path, daily={"referral": 14},
+               company_limits={**common.DEFAULT_COMPANY_LIMITS, "large": 50})
+    staged, _ = _stage(cfg, _mixed_queue(20, 10, 5))
+    # 60/30/10% of 14 -> 8/4/1; the 1 slot left over goes to the best remaining (tier 1)
+    assert _tiers(staged) == {"1": 9, "2": 4, "3": 1}
+
+
+def test_every_tier_gets_at_least_one(tmp_path):
+    cfg = _cfg(tmp_path, daily={"referral": 3},
+               company_limits={**common.DEFAULT_COMPANY_LIMITS, "large": 50})
+    staged, _ = _stage(cfg, _mixed_queue(10, 10, 10))
+    assert _tiers(staged) == {"1": 1, "2": 1, "3": 1}  # even though 10% of 3 rounds to 0
+
+
+def test_unused_tier_slots_go_to_others(tmp_path):
+    cfg = _cfg(tmp_path, daily={"referral": 10},
+               company_limits={**common.DEFAULT_COMPANY_LIMITS, "large": 50})
+    staged, _ = _stage(cfg, _mixed_queue(20, 0, 0))  # only big tech in the queue
+    assert _tiers(staged) == {"1": 10}
+
+
+def test_tier_share_is_adjustable(tmp_path):
+    cfg = _cfg(tmp_path, daily={"referral": 4}, tier_share={1: 0, 2: 100, 3: 0},
+               company_limits={**common.DEFAULT_COMPANY_LIMITS, "large": 50})
+    staged, _ = _stage(cfg, _mixed_queue(10, 10, 10))
+    assert _tiers(staged) == {"2": 4}

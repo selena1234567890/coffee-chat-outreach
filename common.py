@@ -57,8 +57,29 @@ DEFAULT_ROUTING = {"coffee_chat_min_years": 3,
                                           "staff", "head"]}
 # Most emails per type per day.
 DEFAULT_DAILY = {"coffee_chat": 6, "referral": 8}
+# Share of each day's emails per company tier, in percent.
+DEFAULT_TIER_SHARE = {1: 60, 2: 30, 3: 10}
 # Who is staged first. Empty by default; set yours in config.toml.
 DEFAULT_PRIORITY = {"schools": [], "tags": [], "surname_lists": {}}
+
+# Columns a lead (one person to contact) can have, in the order a new queue file uses.
+# Any other column is kept too and can be used as a {{blank}} in templates.
+LEAD_FIELDS = ["type", "contact_email", "first_name", "last_name", "company", "company_size",
+               "title", "start_date", "school", "previous_company", "tier",
+               "open_intern_roles", "priority_tags", "linkedin_url", "email_status",
+               "personal_line", "personal_source", "connection", "target_role", "job_link",
+               "subject", "apollo_id", "found_at"]
+# What the contact finder searches for (see [search] in config.toml).
+DEFAULT_SEARCH = {
+    "titles": ["Data Scientist", "Data Analyst", "Machine Learning Engineer", "AI Engineer",
+               "Applied Scientist", "Research Scientist", "Data Engineer",
+               "Analytics Engineer", "Business Intelligence Analyst", "Product Analyst",
+               "Decision Scientist", "MLOps Engineer"],
+    "manager_titles": True,       # also search managers of these roles
+    "locations": ["United States"],
+    "max_credits_per_run": 25,
+    "required_email_status": "verified",
+}
 
 # Canonical sent-log schema. Existing logs may have only the first columns; that's
 # tolerated on read and extended by `outreach migrate`.
@@ -118,6 +139,26 @@ coffee_chat_titles = ["lead", "manager", "director", "principal", "staff", "head
 [daily]
 coffee_chat = 6
 referral = 8
+
+# What the contact finder (Agent 1) searches for in Apollo. Apollo also matches
+# similar titles, so combinations like "Data Scientist, AI" are included.
+[search]
+titles = ["Data Scientist", "Data Analyst", "Machine Learning Engineer", "AI Engineer",
+          "Applied Scientist", "Research Scientist", "Data Engineer", "Analytics Engineer",
+          "Business Intelligence Analyst", "Product Analyst", "Decision Scientist",
+          "MLOps Engineer"]
+manager_titles = true        # also search managers of these roles
+locations = ["United States"]
+max_credits_per_run = 25     # Apollo credits (1 per email found); the agent asks first
+required_email_status = "verified"   # only add people whose email Apollo verified
+
+# Share of each day's emails per company tier (percent). Every tier with a share
+# above 0 gets at least 1 a day; slots a tier can't fill go to the best people left.
+# Compare reply rates by tier in `outreach status` and adjust.
+[tier_share]
+1 = 60                     # big tech
+2 = 30                     # finance / banking / consulting
+3 = 10                     # other big companies
 
 # Who gets staged first: a matching `school`, or a tag in `priority_tags`.
 [priority]
@@ -188,6 +229,9 @@ def load_config(path=None):
         "daily": {k.strip().lower(): v
                   for k, v in {**DEFAULT_DAILY, **data.get("daily", {})}.items()},
         "priority": priority_cfg,
+        "search": {**DEFAULT_SEARCH, **data.get("search", {})},
+        "tier_share": {int(k): v for k, v in
+                       {**DEFAULT_TIER_SHARE, **data.get("tier_share", {})}.items()},
         "outreach": data.get("outreach", {}),
         "workspace": workspace,
         "config_path": path,
@@ -306,6 +350,18 @@ def company_tier(row, cfg):
         if ".".join(parts[i:]) in targets:
             return targets[".".join(parts[i:])]
     return UNKNOWN_TIER
+
+
+def tier_caps(cfg, day_total):
+    """Most emails per tier today: [tier_share] percent of day_total, at least 1 per tier
+    with a share above 0, so every tier gets some each day."""
+    shares = cfg.get("tier_share") or DEFAULT_TIER_SHARE
+    caps = {t: max(1, round(pct / 100 * day_total)) if pct > 0 else 0
+            for t, pct in shares.items()}
+    # Rounding up to 1 can overshoot a small day; trim the biggest share first.
+    while sum(caps.values()) > day_total and max(caps.values()) > 1:
+        caps[max(caps, key=caps.get)] -= 1
+    return caps
 
 
 def too_small(row, cfg):
@@ -629,6 +685,16 @@ def missing_fields(row, headers, body):
     """Placeholders in the template (headers + body) that this row leaves blank."""
     used = placeholders("\n".join(headers.values()) + "\n" + body)
     return [name for name in used if not (row.get(name) or "").strip()]
+
+
+def print_check_line(row, indent="      "):
+    """Print an agent-written personal line, marked so it's easy to review before sending."""
+    line = (row.get("personal_line") or "").strip()
+    if not line:
+        return
+    print(f'{indent}>> CHECK: "{line}"')
+    source = (row.get("personal_source") or "").strip()
+    print(f"{indent}   " + (f"source: {source}" if source else "(no source: plain line)"))
 
 
 def load_template(template_path):

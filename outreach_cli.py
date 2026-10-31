@@ -18,6 +18,7 @@ Commands:
 import argparse
 import collections
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -146,7 +147,8 @@ def cmd_stage(args, cfg):
     1. remove anyone already sent or staged (by email), or on the do-not-contact list
     2. skip companies under [company_limits].min_employees
     3. fill a blank `type` ([routing]), `tier` (target list) and surname tags
-    4. order: tier (1 first) -> open intern roles first -> priority groups -> queue order
+    4. order: tier (1 first) -> open intern roles first -> priority groups -> queue order;
+       each tier gets its [tier_share] of the day first, leftover slots go to the best rest
     5. at most company_limit people per company ([company_limits], by size)
     6. at most [daily] emails per type today (counting staged + sent today)
     7. at most N in total (-n, default [pacing].batch_size)
@@ -173,8 +175,10 @@ def cmd_stage(args, cfg):
     blk_emails |= {common.normalize_email(r.get("contact_email")) for r in db_rows}
     _, sent_rows = _safe_rows(sent_log)
     per_company = collections.Counter(_company(r) for r in sent_rows + db_rows)
-    used_today = collections.Counter(
-        common.pick_type(r, cfg) for r in db_rows + [r for r in sent_rows if _sent_today(r)])
+    todays = db_rows + [r for r in sent_rows if _sent_today(r)]
+    used_today = collections.Counter(common.pick_type(r, cfg) for r in todays)
+    used_tier = collections.Counter(common.company_tier(r, cfg) for r in todays)
+    tier_cap = common.tier_caps(cfg, sum(daily.values()))
 
     def prepared(r):
         out = dict(r, type=common.pick_type(r, cfg), tier=str(common.company_tier(r, cfg)))
@@ -187,34 +191,45 @@ def cmd_stage(args, cfg):
 
     # Best first; sorted() is stable, so ties keep queue order.
     ranked = sorted(((r, prepared(r)) for r in q_rows), key=rank)
-    to_move, gone, waiting = [], set(), collections.Counter()
+    to_move, gone, why = [], set(), {}
     dropped, blocked = 0, []
-    for orig, r in ranked:
-        email = common.normalize_email(r.get("contact_email"))
-        kind = r["type"]
-        if email in blk_emails:
-            dropped += 1                     # already sent or staged -> remove from queue
-            gone.add(id(orig))
-        elif common.on_do_not_contact(r, cfg):
-            blocked.append(r)                # on the do-not-contact list -> remove
-            gone.add(id(orig))
-        elif common.too_small(r, cfg):
-            waiting["small"] += 1            # under min_employees -> stays in queue
-        elif _company(r) and per_company[_company(r)] >= common.company_limit(r, cfg):
-            waiting["company"] += 1          # company at its limit -> stays in queue
-        elif kind in daily and used_today[kind] >= daily[kind]:
-            waiting["type"] += 1             # today's limit for this type -> stays
-        elif len(to_move) < n:
-            to_move.append(r)
-            gone.add(id(orig))
-            blk_emails.add(email)
-            per_company[_company(r)] += 1
-            used_today[kind] += 1
+    # Pass 1 fills each tier up to its share of the day ([tier_share]); pass 2 gives
+    # any slots a tier couldn't use to the best people left, whatever their tier.
+    for by_share in (True, False):
+        for orig, r in ranked:
+            if id(orig) in gone:
+                continue
+            email = common.normalize_email(r.get("contact_email"))
+            kind, tier = r["type"], int(r["tier"])
+            if email in blk_emails:
+                dropped += 1                 # already sent or staged -> remove from queue
+                gone.add(id(orig))
+            elif common.on_do_not_contact(r, cfg):
+                blocked.append(r)            # on the do-not-contact list -> remove
+                gone.add(id(orig))
+            elif common.too_small(r, cfg):
+                why[id(orig)] = "small"      # under min_employees -> stays in queue
+            elif _company(r) and per_company[_company(r)] >= common.company_limit(r, cfg):
+                why[id(orig)] = "company"    # company at its limit -> stays in queue
+            elif kind in daily and used_today[kind] >= daily[kind]:
+                why[id(orig)] = "type"       # today's limit for this type -> stays
+            elif len(to_move) >= n:
+                why[id(orig)] = "full"       # today's batch is full -> stays
+            elif by_share and used_tier[tier] >= tier_cap.get(tier, 0):
+                why[id(orig)] = "tier"       # tier's share used; may still get a pass-2 slot
+            else:
+                to_move.append(r)
+                gone.add(id(orig))
+                blk_emails.add(email)
+                per_company[_company(r)] += 1
+                used_today[kind] += 1
+                used_tier[tier] += 1
+    waiting = collections.Counter(w for k, w in why.items() if k not in gone)
     leftover = [r for r in q_rows if id(r) not in gone]  # original order, unchanged
 
     if not to_move and not dropped and not blocked:
         print("Nothing new to stage today.")
-        _print_waiting(waiting, used_today, daily)
+        _print_waiting(waiting, used_today, daily, used_tier, tier_cap)
         return
 
     common.backup(queue)
@@ -237,7 +252,7 @@ def cmd_stage(args, cfg):
     for r in blocked:
         print(f"  x removed (do-not-contact list): {r.get('first_name')} {r.get('last_name')}"
               f" at {r.get('company')}")
-    _print_waiting(waiting, used_today, daily)
+    _print_waiting(waiting, used_today, daily, used_tier, tier_cap)
     print("\nNext: `outreach preview`, then `outreach-send --test`, then `outreach-send --send`.")
 
 
@@ -245,12 +260,16 @@ WAITING_REASONS = {
     "small": "company is under min_employees ([company_limits])",
     "company": "their company is at its limit ([company_limits])",
     "type": "today's limit for their type is used up ([daily])",
+    "full": "today's batch is full (-n / [pacing].batch_size)",
 }
 
 
-def _print_waiting(waiting, used_today, daily):
+def _print_waiting(waiting, used_today, daily, used_tier, tier_cap):
     today = ", ".join(f"{k} {used_today[k]}/{v}" for k, v in sorted(daily.items()))
     print(f"\nToday so far: {today}")
+    tiers = ", ".join(f"T{t} {used_tier[t]}/{c}" for t, c in sorted(tier_cap.items()))
+    extra = used_tier[common.UNKNOWN_TIER]
+    print(f"By tier (share): {tiers}" + (f", not listed {extra}" if extra else ""))
     for reason, text in WAITING_REASONS.items():
         if waiting[reason]:
             print(f"  {waiting[reason]} waiting: {text}.")
@@ -405,11 +424,84 @@ def cmd_backfill_dates(args, cfg):
           f"backup in .backups/).")
 
 
+ADD_REQUIRED = ("contact_email", "first_name", "company")
+
+
+def check_lead(r, cfg, known_emails):
+    """Why this lead can't be added (a short reason), or None if it's fine."""
+    missing = [k for k in ADD_REQUIRED if not (r.get(k) or "").strip()]
+    if missing:
+        return f"missing {', '.join(missing)}"
+    email = common.normalize_email(r["contact_email"])
+    if "@" not in email:
+        return "not an email address"
+    if email in known_emails:
+        return "already in queue, batch or sent log"
+    need = (cfg.get("search") or common.DEFAULT_SEARCH).get("required_email_status")
+    if need and (r.get("email_status") or "").strip().lower() != need.lower():
+        return f"email status is {r.get('email_status') or 'unknown'!r}, need {need!r}"
+    if common.on_do_not_contact(r, cfg):
+        return "on the do-not-contact list"
+    if common.too_small(r, cfg):
+        return "company under min_employees"
+    return None
+
+
+def cmd_add(args, cfg):
+    """Add leads from a JSON file (a list of objects, e.g. from the contact finder)
+    to the queue, after checking each one. Use --dry-run to see the result first."""
+    queue, db, sent_log = _paths(cfg)
+    try:
+        with open(args.file, encoding="utf-8") as f:
+            leads = json.load(f)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"ERROR: can't read {args.file}: {e}")
+    if not isinstance(leads, list) or not all(isinstance(x, dict) for x in leads):
+        raise SystemExit("ERROR: the file must hold a JSON list of objects.")
+
+    q_fields, q_rows = _safe_rows(queue)
+    _, db_rows = _safe_rows(db)
+    known = common.sent_emails(sent_log) if os.path.exists(sent_log) else set()
+    known |= {common.normalize_email(r.get("contact_email")) for r in q_rows + db_rows}
+
+    added, skipped = [], []
+    for lead in leads:
+        r = {k: "" if v is None else str(v).strip() for k, v in lead.items()}
+        reason = check_lead(r, cfg, known)
+        if reason:
+            skipped.append((r, reason))
+            continue
+        r["found_at"] = r.get("found_at") or common.utcnow_iso()
+        added.append(r)
+        known.add(common.normalize_email(r["contact_email"]))
+
+    verb = "Would add" if args.dry_run else "Added"
+    print(f"{verb} {len(added)} to {os.path.basename(queue)}; skipped {len(skipped)}.")
+    for r in added:
+        tier = common.company_tier(r, cfg)
+        tier = "T?" if tier == common.UNKNOWN_TIER else f"T{tier}"
+        kind = common.pick_type(r, cfg)
+        print(f"  + {tier} [{kind}] {r.get('first_name')} {r.get('last_name', '')}, "
+              f"{r.get('title', '')} at {r['company']} <{r['contact_email']}>")
+        common.print_check_line(r)
+    for r, reason in skipped:
+        print(f"  - skipped {r.get('first_name', '?')} {r.get('last_name', '')} at "
+              f"{r.get('company', '?')}: {reason}")
+    if args.dry_run or not added:
+        return
+
+    fields = list(q_fields or common.LEAD_FIELDS)
+    for r in added:
+        fields += [k for k in r if k not in fields]
+    common.backup(queue)
+    common.write_db(queue, fields, q_rows + added)
+
+
 COMMANDS = {
     "status": cmd_status, "setup": cmd_setup, "find": cmd_find,
     "stage": cmd_stage, "preview": cmd_preview, "replies": cmd_replies,
     "followup": cmd_followup, "migrate": cmd_migrate,
-    "backfill-dates": cmd_backfill_dates,
+    "backfill-dates": cmd_backfill_dates, "add": cmd_add,
 }
 
 
@@ -423,6 +515,10 @@ def main():
         if name == "stage":
             p.add_argument("-n", type=int, default=None,
                            help="how many to stage (default: [pacing].batch_size)")
+        if name == "add":
+            p.add_argument("file", help="JSON file: a list of leads (objects)")
+            p.add_argument("--dry-run", action="store_true",
+                           help="show what would be added, change nothing")
         if name == "backfill-dates":
             p.add_argument("--apply", action="store_true",
                            help="write the dates (default: dry-run preview)")

@@ -39,3 +39,7 @@ CLAUDE.md
 
 # Real people you know (private); the .example file is committed instead
 data/do_not_contact.csv
+
+# Contact finder output (real people and emails)
+data/leads/
+data/linkedin_links.txt
