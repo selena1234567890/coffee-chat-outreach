@@ -228,3 +228,17 @@ def test_stage_skips_already_staged(tmp_path):
 
     _, db_rows = common.read_rows(cfg["files"]["database"])
     assert len(db_rows) == 1  # not duplicated
+
+
+def test_setup_handles_template_versions_and_resume_link(tmp_path, capsys):
+    (tmp_path / "t1.txt").write_text("TO: {{contact_email}}\nSUBJECT: Hi\n\nBody {{resume_link}}\n")
+    (tmp_path / "t2.txt").write_text("TO: {{contact_email}}\nSUBJECT: Hi\n\nBody\n")
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text('[email]\naddress = "me@gmail.com"\n'
+                        '[templates]\ncoffee_chat = ["t1.txt", "t2.txt"]\n'
+                        '[blanks]\nresume_link = "https://drive.example/cv"\n')
+    outreach_cli.cmd_setup(argparse.Namespace(), common.load_config(str(cfg_path)))
+    out = capsys.readouterr().out
+    assert "Template [coffee_chat]: OK t1.txt" in out and "OK t2.txt" in out
+    assert "Resume link: OK https://drive.example/cv" in out
+    assert "Resume file" not in out  # no template attaches a file

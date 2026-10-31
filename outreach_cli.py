@@ -106,11 +106,20 @@ def cmd_setup(args, cfg):
     else:
         print(f"config.toml: OK ({cfg_path})")
 
-    resume = cfg["files"]["resume"]
-    print(f"Resume: {'OK ' + resume if os.path.exists(resume) else 'MISSING -> ' + resume}")
-    for kind, path in (cfg.get("templates") or {"default": cfg["files"]["template"]}).items():
-        status = "OK " if os.path.exists(path) else "MISSING -> copy the .example, then edit "
-        print(f"Template [{kind}]: {status}{path}")
+    attaches = False
+    for kind, paths in (cfg.get("templates") or {"default": cfg["files"]["template"]}).items():
+        for path in paths if isinstance(paths, list) else [paths]:
+            if not os.path.exists(path):
+                print(f"Template [{kind}]: MISSING -> copy the .example, then edit {path}")
+                continue
+            attaches |= "ATTACHMENT" in common.load_template(path)[0]
+            print(f"Template [{kind}]: OK {os.path.basename(path)}")
+    link = common.with_blanks({}, cfg).get("resume_link")
+    print(f"Resume link: {'OK ' + link if link else 'UNSET -> set [blanks].resume_link'}")
+    if attaches:  # only needed when a template still attaches the file
+        resume = cfg["files"]["resume"]
+        found = os.path.exists(resume)
+        print(f"Resume file: {'OK' if found else 'MISSING ->'} {resume}")
 
     backend, ok, hint = common.secret_status(cfg["email"]["keychain_service"])
     print(f"Password: {'OK via ' + backend if ok else 'MISSING -> ' + hint}")
