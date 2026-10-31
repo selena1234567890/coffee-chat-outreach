@@ -47,9 +47,6 @@ Safety checks added:
 - **Test send** — `outreach-send --test` sends the first 2 emails to **your own** address
   (subject starts with `[TEST to …]`). Nothing is logged.
 
-Built on [internship-cold-email-kit](https://github.com/Mianmalol/internship-cold-email-kit)
-by Marco Li (MIT).
-
 ---
 
 ## Contents
