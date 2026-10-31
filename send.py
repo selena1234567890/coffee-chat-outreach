@@ -28,10 +28,14 @@ One-time Keychain setup (stores the Gmail APP password, encrypted, not on disk):
   security add-generic-password -s mailmerge-gmail -a "$USER" -w
 """
 import argparse
+import datetime
 import mimetypes
 import os
+import random
 import sys
+import time
 from email.message import EmailMessage
+from email.utils import make_msgid
 
 import common
 
@@ -44,6 +48,11 @@ def build_message(row, headers, body, base_dir):
     msg["To"] = common.render(headers["TO"], row)
     msg["Subject"] = common.render(headers["SUBJECT"], row)
     msg["From"] = common.render(headers.get("FROM", ""), row)
+    if row.get("message_id"):
+        msg["Message-ID"] = row["message_id"]
+    if row.get("in_reply_to"):  # a follow-up: keep it in the same email thread
+        msg["In-Reply-To"] = row["in_reply_to"]
+        msg["References"] = row["in_reply_to"]
     msg.set_content(common.render(body, row))
     attach = headers.get("ATTACHMENT")
     if attach:
@@ -56,11 +65,20 @@ def build_message(row, headers, body, base_dir):
     return msg
 
 
-def send_test(cfg, plan, workspace):
+def wait_between_emails(cfg):
+    """Pause a random [sending] min_gap_seconds..max_gap_seconds, so sends look human."""
+    gap = {**common.DEFAULT_SENDING, **(cfg.get("sending") or {})}
+    seconds = random.uniform(gap["min_gap_seconds"], gap["max_gap_seconds"])
+    print(f"  (waiting {seconds:.0f}s before the next email)")
+    time.sleep(seconds)
+
+
+def send_test(cfg, plan, workspace, to=None):
     """Send rendered emails to the sender's OWN address, marked [TEST].
 
     Nothing is logged and the database is untouched, so the real send still
-    happens later. Use it to see exactly what a recipient will see.
+    happens later. Use it to see exactly what a recipient will see. With `to`
+    (a spam check), the email goes there unchanged, with no [TEST] mark.
     """
     try:
         common.validate_for_send(cfg)
@@ -73,11 +91,12 @@ def send_test(cfg, plan, workspace):
         for r, headers, body in plan:
             msg = build_message(r, headers, body, workspace)
             real_to = msg["To"]
-            msg.replace_header("To", me)
-            msg.replace_header("Subject", f"[TEST to {real_to}] {msg['Subject']}")
+            msg.replace_header("To", to or me)
+            if not to:
+                msg.replace_header("Subject", f"[TEST to {real_to}] {msg['Subject']}")
             smtp.send_message(msg)
-            print(f"  test sent -> {me} (would go to {real_to})")
-    print("\nCheck your inbox. Nothing was logged; run --send when it looks right.")
+            print(f"  test sent -> {to or me} (would go to {real_to})")
+    print("\nCheck that inbox. Nothing was logged; run --send when it looks right.")
 
 
 def main():
@@ -87,6 +106,9 @@ def main():
     ap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     ap.add_argument("--test", action="store_true",
                     help=f"send the first {TEST_COUNT} emails to your own address only")
+    ap.add_argument("--spam-check", metavar="ADDRESS",
+                    help="send the first email, unchanged, to another address of yours "
+                         "(e.g. Outlook) to see if it lands in inbox or spam")
     args = ap.parse_args()
 
     cfg = common.load_config(common.find_config(args.config))
@@ -103,6 +125,9 @@ def main():
     # the crash window where a row was archived but not yet removed from the DB), and
     # never send the SAME address twice within one batch (case/whitespace-insensitive).
     already = common.sent_emails(LOG)
+    log_rows = common.read_rows(LOG)[1] if os.path.exists(LOG) else []
+    followed = {common.normalize_email(r.get("contact_email")) for r in log_rows
+                if (r.get("type") or "").strip().lower() == "followup"}
     seen, fresh = set(), []
     n_sent = n_dup = n_blank = n_dnc = 0
     for r in rows:
@@ -111,8 +136,9 @@ def main():
             n_blank += 1
         elif common.on_do_not_contact(r, cfg):
             n_dnc += 1
-        elif em in already:
-            n_sent += 1
+        elif (em in followed if (r.get("type") or "").strip().lower() == "followup"
+              else em in already):
+            n_sent += 1  # a first email, or a follow-up, already went to this address
         elif em in seen:
             n_dup += 1
         else:
@@ -134,6 +160,7 @@ def main():
     # Pick each row's template (by `type`) and check every placeholder is filled.
     # Any problem blocks the whole batch: fix the CSV, then re-run.
     loaded, plan, problems = {}, [], []
+    rows = [common.with_blanks(r, cfg) for r in rows]
     for r in rows:
         who = r.get("contact_email")
         try:
@@ -150,6 +177,7 @@ def main():
                 sys.exit(f"ERROR: template {path} missing header(s): {', '.join(missing)}")
             loaded[path] = (headers, body)
         headers, body = loaded[path]
+        r["template_version"] = os.path.basename(path)
         blank = common.missing_fields(r, headers, body)
         if blank:
             problems.append(f"{who}: blank {', '.join(blank)}")
@@ -172,6 +200,14 @@ def main():
 
     if args.test:
         send_test(cfg, plan[:TEST_COUNT], workspace)
+        return
+    if args.spam_check:
+        send_test(cfg, plan[:1], workspace, to=args.spam_check)
+        state = common.load_state(cfg)
+        state["spam_check_sent"] = datetime.date.today().isoformat()
+        common.save_state(cfg, state)
+        print("Then record what happened: `outreach health --spam-check inbox` or "
+              "`outreach health --spam-check spam`.")
         return
 
     if not args.send:
@@ -205,14 +241,25 @@ def main():
     # already sent or (b) leave a sent row staged for an accidental re-send.
     log_fields = common.SENT_LOG_FIELDS + [f for f in fieldnames
                                            if f not in common.SENT_LOG_FIELDS]
-    remaining, failed = list(rows), []
+    remaining, failed, sent_n = list(rows), [], 0
+    domain = username.rpartition("@")[2] or None
     with common.smtp_session(host, port, username, password) as smtp:
-        for r, headers, body in plan:
+        for i, (r, headers, body) in enumerate(plan):
+            if i:
+                wait_between_emails(cfg)
+            r["message_id"] = make_msgid(domain=domain)
             try:
-                smtp.send_message(build_message(r, headers, body, workspace))
+                msg = build_message(r, headers, body, workspace)
+                r["subject_sent"] = msg["Subject"]
+                smtp.send_message(msg)
             except Exception as e:
                 print(f"  FAILED -> {r['contact_email']} ({r.get('company')}): {e}")
                 failed.append(r)
+                if common.is_sending_limit_error(e):
+                    resume = common.record_warning(cfg, f"Gmail sending limit: {e}")
+                    print(f"\n  Gmail says a sending limit was reached. Stopping now and "
+                          f"pausing until {resume}; the rest stay in the batch.")
+                    break
                 continue
             # Sent successfully. A failure recording it is NOT a send failure: we
             # must stop immediately rather than keep sending into an inconsistent
@@ -221,18 +268,19 @@ def main():
                 common.archive(LOG, log_fields,
                                [{**r, "sent_at": common.utcnow_iso()}])
                 remaining.remove(r)
-                common.write_db(DB, fieldnames, remaining)
+                common.write_db(DB, fieldnames, remaining, ignore_extra=True)
             except Exception as e:
                 sys.exit(f"\n  CRITICAL: sent to {r['contact_email']} but failed to "
                          f"record it: {e}\n  Aborting batch. Reconcile {os.path.basename(LOG)} "
                          f"and {os.path.basename(DB)} before resending.")
             print(f"  sent -> {r['contact_email']} ({r.get('company')})")
+            sent_n += 1
 
-    sent_n = len(rows) - len(failed)
     if sent_n:
         print(f"\nDone. {sent_n} sent and archived to {os.path.basename(LOG)}.")
-        if failed:
-            print(f"{len(failed)} failed and kept in {os.path.basename(DB)} for retry.")
+        if remaining:
+            print(f"{len(remaining)} not sent ({len(failed)} failed) and kept in "
+                  f"{os.path.basename(DB)} for retry.")
         else:
             print(f"{os.path.basename(DB)} is now empty (header only), ready for the next batch.")
         print("Tip: watch for Mailer-Daemon bounces over the next few hours.")

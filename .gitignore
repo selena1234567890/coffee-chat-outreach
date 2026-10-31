@@ -43,3 +43,6 @@ data/do_not_contact.csv
 # Contact finder output (real people and emails)
 data/leads/
 data/linkedin_links.txt
+
+# Sending state: ramp step, pauses, warnings (private)
+data/send_state.json

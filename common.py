@@ -14,7 +14,9 @@ import csv
 import datetime
 import functools
 import getpass
+import hashlib
 import imaplib
+import json
 import os
 import re
 import shutil
@@ -46,6 +48,7 @@ DEFAULT_FILES = {
     "resume": "resume.pdf",
     "targets": "data/target_companies.csv",
     "do_not_contact": "data/do_not_contact.csv",
+    "send_state": "data/send_state.json",
 }
 DEFAULT_PACING = {"batch_size": 14, "followup_after_days": 6}
 # Most people to contact per company, by company size (employee count).
@@ -57,6 +60,16 @@ DEFAULT_ROUTING = {"coffee_chat_min_years": 3,
                                           "staff", "head"]}
 # Most emails per type per day.
 DEFAULT_DAILY = {"coffee_chat": 6, "referral": 8}
+# Volume ramp: [emails per day, days at this step] (0 days = stay there). The ramp
+# moves up only after a full step with no warning sign; a warning pauses sending
+# for pause_days and steps down one level.
+DEFAULT_RAMP = {"enabled": True, "steps": [[13, 3], [18, 7], [25, 7], [35, 0]],
+                "pause_days": 2, "bounce_limit_percent": 3, "bounce_window": 50,
+                "spam_check_every_days": 3}
+# One follow-up to people who haven't replied after this many business days.
+DEFAULT_FOLLOWUP = {"enabled": True, "after_business_days": 3}
+# Random wait between emails at send time, so they don't all go out at once.
+DEFAULT_SENDING = {"min_gap_seconds": 60, "max_gap_seconds": 180}
 # Share of each day's emails per company tier, in percent.
 DEFAULT_TIER_SHARE = {1: 60, 2: 30, 3: 10}
 # Who is staged first. Empty by default; set yours in config.toml.
@@ -95,7 +108,8 @@ DEFAULT_SEARCH = {
 # Canonical sent-log schema. Existing logs may have only the first columns; that's
 # tolerated on read and extended by `outreach migrate`.
 SENT_LOG_FIELDS = ["contact_email", "contact_name", "company", "role",
-                   "subject", "note", "type", "sent_at", "last_reply"]
+                   "subject", "note", "type", "template_version", "subject_sent",
+                   "message_id", "sent_at", "last_reply", "bounced_at"]
 
 # Embedded so `outreach setup` can scaffold a config without a shipped example file
 # (works for any install mode, editable or wheel).
@@ -123,6 +137,9 @@ do_not_contact = "data/do_not_contact.csv"   # people never to cold email (priva
 [templates]
 coffee_chat = "templates/coffee_chat.txt"
 referral = "templates/referral.txt"
+followup = "templates/followup.txt"
+# 2-3 versions of a type, so not every email has the same wording, e.g.:
+# coffee_chat = ["templates/coffee_chat_1.txt", "templates/coffee_chat_2.txt"]
 
 [pacing]
 batch_size = 14            # most emails per day in total; do not blast
@@ -169,6 +186,30 @@ max_email_age_years = 2
 handpicked_sources = ["chrome_extension_linkedin"]
 handpicked_since = "2026-10-31"
 
+# Daily volume ramp. The day's emails (new + follow-ups) follow these steps; within a
+# day they're split between types like [daily] (6:8 -> about 3:4). Moves up a step only
+# after a full step with no warning sign. Warning signs (bounces over the limit, a
+# Gmail sending-limit error, a spam check that landed in spam) pause sending for
+# pause_days, then go down one step. See `outreach health`.
+[ramp]
+enabled = true
+steps = [[13, 3], [18, 7], [25, 7], [35, 0]]   # [emails per day, days]; 0 days = stay
+pause_days = 2
+bounce_limit_percent = 3
+bounce_window = 50           # bounce rate over your last 50 emails
+spam_check_every_days = 3    # remind you to run a spam check this often
+
+# One follow-up (in the same email thread, using templates/followup.txt) to people
+# who haven't replied after this many business days. Never more than one per person.
+[followup]
+enabled = true
+after_business_days = 3
+
+# Wait a random time between emails so they don't all go out at once.
+[sending]
+min_gap_seconds = 60
+max_gap_seconds = 180
+
 # Share of each day's emails per company tier (percent). Every tier with a share
 # above 0 gets at least 1 a day; slots a tier can't fill go to the best people left.
 # Compare reply rates by tier in `outreach status` and adjust.
@@ -190,6 +231,11 @@ chinese = "data/chinese_surnames.txt"
 [outreach]
 # The one thing you specify: what kind of internships/roles to target.
 area = "<e.g. Machine Learning, scientific computing; remote, unpaid>"
+
+# Values that are the same in every email; use them in any template as {{name}}.
+# A column with the same name in your spreadsheet wins over these.
+[blanks]
+resume_link = "<link to your resume, e.g. a Google Drive 'anyone with the link' URL>"
 '''
 
 
@@ -232,7 +278,8 @@ def load_config(path=None):
     email_cfg = {**DEFAULT_EMAIL, **data.get("email", {})}
     files_cfg = {k: resolve(v, workspace)
                  for k, v in {**DEFAULT_FILES, **data.get("files", {})}.items()}
-    templates_cfg = {k.strip().lower(): resolve(v, workspace)
+    templates_cfg = {k.strip().lower(): ([resolve(p, workspace) for p in v]
+                                         if isinstance(v, list) else resolve(v, workspace))
                      for k, v in data.get("templates", {}).items()}
     priority_cfg = {**DEFAULT_PRIORITY, **data.get("priority", {})}
     priority_cfg["surname_lists"] = {k.strip().lower(): resolve(v, workspace)
@@ -251,6 +298,10 @@ def load_config(path=None):
         "tier_share": {int(k): v for k, v in
                        {**DEFAULT_TIER_SHARE, **data.get("tier_share", {})}.items()},
         "outreach": data.get("outreach", {}),
+        "blanks": data.get("blanks", {}),
+        "ramp": {**DEFAULT_RAMP, **data.get("ramp", {})},
+        "sending": {**DEFAULT_SENDING, **data.get("sending", {})},
+        "followup": {**DEFAULT_FOLLOWUP, **data.get("followup", {})},
         "workspace": workspace,
         "config_path": path,
     }
@@ -276,7 +327,10 @@ def validate_for_send(cfg):
 
 def template_paths(cfg):
     """Every template this config can use: the [templates] map, else [files].template."""
-    return list((cfg.get("templates") or {}).values()) or [cfg["files"]["template"]]
+    paths = []
+    for v in (cfg.get("templates") or {}).values():
+        paths += v if isinstance(v, list) else [v]
+    return paths or [cfg["files"]["template"]]
 
 
 def template_for(row, cfg):
@@ -284,7 +338,9 @@ def template_for(row, cfg):
 
     With a [templates] map, the row's type must be one of its keys (ValueError
     otherwise), so a typo never silently falls back to the wrong email. Without
-    one, every row uses [files].template.
+    one, every row uses [files].template. A type may list several versions; each
+    person always gets the same one (picked from their email address), so preview
+    and send match, and the choice is spread evenly across people.
     """
     templates = cfg.get("templates") or {}
     if not templates:
@@ -293,7 +349,11 @@ def template_for(row, cfg):
     if kind not in templates:
         raise ValueError(f"type {kind or '(blank)'!r} is not one of: "
                          f"{', '.join(sorted(templates))}")
-    return templates[kind]
+    choice = templates[kind]
+    if not isinstance(choice, list):
+        return choice
+    digest = hashlib.sha256(normalize_email(row.get("contact_email")).encode()).hexdigest()
+    return choice[int(digest, 16) % len(choice)]
 
 
 def company_size(row):
@@ -516,6 +576,105 @@ def priority_score(row, cfg):
     return len(priority_groups(row, cfg))
 
 
+def load_state(cfg):
+    """The sending state (ramp step, pause, warnings, spam checks); {} if none yet."""
+    path = (cfg.get("files") or {}).get("send_state")
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_state(cfg, state):
+    path = cfg["files"]["send_state"]
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    _atomic_write(path, lambda f: json.dump(state, f, indent=2))
+
+
+def first_send_date(sent_rows):
+    """Local date of the earliest sent_at in the sent log, or None."""
+    dates = []
+    for r in sent_rows:
+        try:
+            dt = datetime.datetime.strptime((r.get("sent_at") or "").strip(),
+                                            "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            continue
+        dates.append(dt.replace(tzinfo=datetime.timezone.utc).astimezone().date())
+    return min(dates) if dates else None
+
+
+def ramp_status(cfg, first_send=None, today=None):
+    """Today's email limit from the ramp: {per_day, step, step_started, paused_until}.
+
+    The ramp starts on your first real send. per_day is 0 while paused. Moving up a
+    step is saved to the state file.
+    """
+    ramp = {**DEFAULT_RAMP, **(cfg.get("ramp") or {})}
+    steps = ramp["steps"]
+    today = today or datetime.date.today()
+    state = load_state(cfg)
+    if not state.get("step_started"):
+        if first_send is None:  # nothing sent yet: the first step, nothing to save
+            return {"per_day": steps[0][0], "step": 0, "step_started": None,
+                    "paused_until": None}
+        state.update(step=0, step_started=first_send.isoformat())
+    step = min(int(state.get("step", 0)), len(steps) - 1)
+    started = datetime.date.fromisoformat(state["step_started"])
+    paused = state.get("paused_until") or None
+    if paused and today < datetime.date.fromisoformat(paused):
+        return {"per_day": 0, "step": step, "step_started": started, "paused_until": paused}
+    while step < len(steps) - 1 and steps[step][1] > 0 \
+            and (today - started).days >= steps[step][1]:
+        started += datetime.timedelta(days=steps[step][1])
+        step += 1
+    if (step, started.isoformat()) != (state.get("step"), state.get("step_started")) \
+            or "step" not in state:
+        state.update(step=step, step_started=started.isoformat())
+        save_state(cfg, state)
+    return {"per_day": steps[step][0], "step": step, "step_started": started,
+            "paused_until": None}
+
+
+def record_warning(cfg, reason, today=None):
+    """A warning sign: pause sending for [ramp].pause_days, then go down one step."""
+    ramp = {**DEFAULT_RAMP, **(cfg.get("ramp") or {})}
+    today = today or datetime.date.today()
+    resume = today + datetime.timedelta(days=ramp["pause_days"])
+    state = load_state(cfg)
+    state.update(step=max(0, int(state.get("step", 0)) - 1),
+                 step_started=resume.isoformat(), paused_until=resume.isoformat())
+    state.setdefault("warnings", []).append({"date": today.isoformat(), "reason": reason})
+    save_state(cfg, state)
+    return resume
+
+
+def split_daily(daily, total):
+    """Split a day's total between email types in the same ratio as [daily].
+
+    Each type gets its whole-number share; leftover emails go to the types with the
+    biggest remainders, so the parts always add up to the total.
+    """
+    weights = {k: v for k, v in daily.items() if v > 0}
+    if not weights or total <= 0:
+        return {k: 0 for k in daily}
+    exact = {k: total * v / sum(weights.values()) for k, v in weights.items()}
+    out = {k: int(x) for k, x in exact.items()}
+    by_remainder = sorted(exact, key=lambda k: exact[k] - out[k], reverse=True)
+    for k in by_remainder[:total - sum(out.values())]:
+        out[k] += 1
+    return out
+
+
+LIMIT_ERROR_WORDS = ("sending limit", "daily user sending", "quota", "5.4.5", "rate limit",
+                     "too many")
+
+
+def is_sending_limit_error(exc):
+    """True if an SMTP error looks like Gmail telling us we've hit a sending limit."""
+    return any(w in str(exc).lower() for w in LIMIT_ERROR_WORDS)
+
+
 def backup(path, backup_dir=None):
     """Copy `path` into a `.backups/` dir (next to it) with a UTC timestamp.
 
@@ -714,6 +873,18 @@ def placeholders(text):
     return list(dict.fromkeys(re.findall(r"\{\{(\w+)\}\}", text)))
 
 
+def with_blanks(row, cfg):
+    """The row plus the shared [blanks] values (a filled-in row column wins).
+
+    A [blanks] value still written like "<...>" counts as not filled in, so the
+    blank check stops the send instead of mailing the placeholder text.
+    """
+    shared = {k: str(v) for k, v in (cfg.get("blanks") or {}).items()
+              if not re.fullmatch(r"\s*<.*>\s*", str(v))}
+    filled = {k: v for k, v in row.items() if (v or "").strip()}
+    return {**row, **shared, **filled}
+
+
 def missing_fields(row, headers, body):
     """Placeholders in the template (headers + body) that this row leaves blank."""
     used = placeholders("\n".join(headers.values()) + "\n" + body)
@@ -814,14 +985,16 @@ def migrate_sent_log(log_path):
     return True
 
 
-def write_db(db_path, fieldnames, rows):
+def write_db(db_path, fieldnames, rows, ignore_extra=False):
     """Atomically rewrite the database with exactly `rows` (header always written).
 
     Uses a temp file + os.replace so a crash mid-write can never leave a truncated
-    or half-written CSV that would lose staged leads.
+    or half-written CSV that would lose staged leads. With ignore_extra, keys that
+    are not columns of the file are left out instead of raising.
     """
     def _w(f):
-        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w = csv.DictWriter(f, fieldnames=fieldnames,
+                           extrasaction="ignore" if ignore_extra else "raise")
         w.writeheader()
         w.writerows(rows)
     _atomic_write(db_path, _w)

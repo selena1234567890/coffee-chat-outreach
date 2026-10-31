@@ -142,6 +142,47 @@ def _sent_today(r):
     return local.date() == datetime.date.today()
 
 
+def _is_followup(r):
+    return (r.get("type") or "").strip().lower() == "followup"
+
+
+def business_days_between(start, end):
+    """Weekdays after `start` up to and including `end` (Mon-Fri)."""
+    days, d = 0, start
+    while d < end:
+        d += datetime.timedelta(days=1)
+        days += d.weekday() < 5
+    return days
+
+
+def due_followups(sent_rows, db_rows, cfg, today=None):
+    """Follow-up rows for people who haven't replied [followup].after_business_days
+    business days after their first email. One follow-up per person, ever; never to
+    anyone who replied, bounced, or is on the do-not-contact list."""
+    fu = {**common.DEFAULT_FOLLOWUP, **(cfg.get("followup") or {})}
+    if not fu["enabled"]:
+        return []
+    today = today or datetime.date.today()
+    done = {common.normalize_email(r.get("contact_email"))
+            for r in sent_rows + db_rows if _is_followup(r)}
+    out = []
+    for r in sent_rows:
+        email = common.normalize_email(r.get("contact_email"))
+        if (_is_followup(r) or email in done or not r.get("message_id")
+                or (r.get("last_reply") or "").strip() or (r.get("bounced_at") or "").strip()
+                or common.on_do_not_contact(r, cfg)):
+            continue
+        sent = common.first_send_date([r])
+        if sent is None or business_days_between(sent, today) < fu["after_business_days"]:
+            continue
+        out.append({**r, "type": "followup", "in_reply_to": r["message_id"],
+                    "original_subject": r.get("subject_sent") or r.get("subject", ""),
+                    "first_sent_at": r.get("sent_at", ""), "sent_at": "", "message_id": "",
+                    "subject_sent": "", "template_version": ""})
+        done.add(email)
+    return out
+
+
 def cmd_stage(args, cfg):
     """Move today's batch from the queue into the database, following the rules:
 
@@ -156,30 +197,52 @@ def cmd_stage(args, cfg):
     People skipped by 2 and 5-7 stay in the queue (for another day, or a changed setting).
     """
     queue, db, sent_log = _paths(cfg)
-    n = args.n if args.n is not None else cfg["pacing"]["batch_size"]
+    q_fields, q_rows = _safe_rows(queue)
+    db_fields, db_rows = _safe_rows(db)
+    _, sent_rows = _safe_rows(sent_log)
+    todays = db_rows + [r for r in sent_rows if _sent_today(r)]
+    firsts = [r for r in sent_rows + db_rows if not _is_followup(r)]  # first emails only
+
+    daily = cfg.get("daily") or common.DEFAULT_DAILY
+    if (cfg.get("ramp") or {}).get("enabled"):
+        ramp = common.ramp_status(cfg, first_send=common.first_send_date(sent_rows))
+        if ramp["per_day"] == 0:
+            print(f"Paused after a warning sign until {ramp['paused_until']}. "
+                  "See `outreach health`.")
+            return
+        day_total = ramp["per_day"]
+        daily = common.split_daily(daily, day_total)
+        room = day_total - len(todays)
+        n = room if args.n is None else min(args.n, room)
+        print(f"Ramp step {ramp['step'] + 1}: {day_total} emails today "
+              f"({len(todays)} already staged or sent).")
+    else:
+        day_total = sum(daily.values())
+        n = args.n if args.n is not None else cfg["pacing"]["batch_size"]
     if n <= 0:
-        print(f"Nothing to do: stage count is {n}.")
+        print("Nothing to do: today's limit is reached.")
         return
 
-    q_fields, q_rows = _safe_rows(queue)
-    if not q_rows:
+    followups = due_followups(sent_rows, db_rows, cfg)[:n]
+    n -= len(followups)
+    if not q_rows and not followups:
         print("Queue is empty (header only). Run `find` + the contact finder to refill.")
         return
-    db_fields, db_rows = _safe_rows(db)
-    fields = list(db_fields or q_fields)
-    for extra in ("type", "tier", "priority_tags"):
+    fields = list(db_fields or q_fields or common.LEAD_FIELDS)
+    extras = ["type", "tier", "priority_tags"]
+    if followups:
+        extras += [k for r in followups for k in r]
+    for extra in extras:
         if extra not in fields:
             fields.append(extra)
 
-    daily = cfg.get("daily") or common.DEFAULT_DAILY
     blk_emails = common.sent_emails(sent_log)
     blk_emails |= {common.normalize_email(r.get("contact_email")) for r in db_rows}
-    _, sent_rows = _safe_rows(sent_log)
-    per_company = collections.Counter(_company(r) for r in sent_rows + db_rows)
-    todays = db_rows + [r for r in sent_rows if _sent_today(r)]
+    per_company = collections.Counter(_company(r) for r in firsts)
     used_today = collections.Counter(common.pick_type(r, cfg) for r in todays)
-    used_tier = collections.Counter(common.company_tier(r, cfg) for r in todays)
-    tier_cap = common.tier_caps(cfg, sum(daily.values()))
+    used_tier = collections.Counter(common.company_tier(r, cfg) for r in todays
+                                    if not _is_followup(r))
+    tier_cap = common.tier_caps(cfg, day_total)
 
     def prepared(r):
         out = dict(r, type=common.pick_type(r, cfg), tier=str(common.company_tier(r, cfg)))
@@ -228,7 +291,7 @@ def cmd_stage(args, cfg):
     waiting = collections.Counter(w for k, w in why.items() if k not in gone)
     leftover = [r for r in q_rows if id(r) not in gone]  # original order, unchanged
 
-    if not to_move and not dropped and not blocked:
+    if not to_move and not dropped and not blocked and not followups:
         print("Nothing new to stage today.")
         _print_waiting(waiting, used_today, daily, used_tier, tier_cap)
         return
@@ -238,11 +301,18 @@ def cmd_stage(args, cfg):
     # DB grows first (additive), queue is rewritten without moved-or-handled rows.
     # If interrupted between the two writes, the email dedup above plus the
     # idempotency check in send.py mean nothing double-sends; backups aid recovery.
-    common.write_db(db, fields, db_rows + to_move)
+    common.write_db(db, fields, db_rows + followups + to_move)
     common.write_db(queue, q_fields, leftover)
 
-    print(f"Staged {len(to_move)} -> {os.path.basename(db)}; "
-          f"dropped {dropped} already-handled; {len(leftover)} left in queue.")
+    print(f"Staged {len(followups)} follow-up(s) + {len(to_move)} new -> "
+          f"{os.path.basename(db)}; dropped {dropped} already-handled; "
+          f"{len(leftover)} left in queue.")
+    for r in followups:
+        print(f"  ~ [followup] {r.get('company')} <{r.get('contact_email')}> "
+              f"(first email {r.get('first_sent_at', '')[:10]})")
+    if followups:
+        print("  (Follow-ups use the replies in the sent log: run "
+              "`outreach backfill-dates --apply` first so nobody who replied gets one.)")
     for r in to_move:
         groups = common.priority_groups(r, cfg)
         star = f"  * {', '.join(groups)}" if groups else ""
@@ -281,6 +351,92 @@ def cmd_preview(args, cfg):
     rc = subprocess.run([PY, "-m", "send", "--config", cfg["config_path"]]).returncode
     if rc:
         raise SystemExit(rc)
+
+
+def mark_bounces(sent_log, bounced, today=None):
+    """Stamp bounced_at on sent-log rows whose address bounced; returns how many are new."""
+    fields, rows = _safe_rows(sent_log)
+    if not rows:
+        return 0
+    stamp = (today or datetime.date.today()).isoformat()
+    new = 0
+    for r in rows:
+        if common.normalize_email(r.get("contact_email")) in bounced \
+                and not (r.get("bounced_at") or "").strip():
+            r["bounced_at"] = stamp
+            new += 1
+    if new:
+        fields = list(fields) + [f for f in ("bounced_at",) if f not in fields]
+        common.backup(sent_log)
+        common.write_db(sent_log, fields, rows)
+    return new
+
+
+def bounce_rate(sent_rows, window):
+    """Share of your last `window` first emails that bounced (0.0 if none sent)."""
+    firsts = [r for r in sent_rows if not _is_followup(r)][-window:]
+    if not firsts:
+        return 0.0
+    return sum(bool((r.get("bounced_at") or "").strip()) for r in firsts) / len(firsts)
+
+
+def cmd_health(args, cfg):
+    """Check sending health: bounces (from Gmail), spam checks, ramp step, pauses.
+    A warning sign pauses sending for [ramp].pause_days and steps down the ramp."""
+    _, _, sent_log = _paths(cfg)
+    ramp_cfg = {**common.DEFAULT_RAMP, **(cfg.get("ramp") or {})}
+
+    if args.spam_check:
+        state = common.load_state(cfg)
+        state["last_spam_check"] = {"date": datetime.date.today().isoformat(),
+                                    "result": args.spam_check}
+        common.save_state(cfg, state)
+        if args.spam_check == "spam":
+            resume = common.record_warning(cfg, "spam check landed in spam")
+            print(f"Spam check landed in SPAM: pausing until {resume}, one ramp step down.")
+        else:
+            print("Spam check landed in the inbox. Good.")
+
+    if not args.no_imap and os.path.exists(sent_log):
+        import read_replies  # local import: only the bounce check needs IMAP
+        em = cfg["email"]
+        imap = common.imap_login(em["address"], common.get_password(em["keychain_service"]),
+                                 readonly=True, host=em["imap_host"])
+        try:
+            contacts = [(common.normalize_email(r.get("contact_email")), "")
+                        for r in _safe_rows(sent_log)[1]]
+            bounced = read_replies.find_bounces(imap, contacts)
+        finally:
+            imap.logout()
+        new = mark_bounces(sent_log, bounced)
+        rate = bounce_rate(_safe_rows(sent_log)[1], ramp_cfg["bounce_window"])
+        print(f"Bounces: {new} new; {rate:.0%} of your last {ramp_cfg['bounce_window']} "
+              f"emails (limit {ramp_cfg['bounce_limit_percent']}%).")
+        if new and rate * 100 > ramp_cfg["bounce_limit_percent"]:
+            resume = common.record_warning(cfg, f"bounce rate {rate:.0%}")
+            print(f"  Too many bounces: pausing until {resume}, one ramp step down.")
+
+    _, sent_rows = _safe_rows(sent_log)
+    status = common.ramp_status(cfg, first_send=common.first_send_date(sent_rows))
+    state = common.load_state(cfg)
+    steps = ramp_cfg["steps"]
+    print("\n=== Sending health ===")
+    if status["per_day"] == 0:
+        print(f"  PAUSED until {status['paused_until']}")
+    else:
+        print(f"  Ramp: step {status['step'] + 1} of {len(steps)}, "
+              f"{status['per_day']} emails/day"
+              + ("" if status["step_started"] else " (starts with your first real send)"))
+    for w in state.get("warnings", [])[-3:]:
+        print(f"  Warning {w['date']}: {w['reason']}")
+    last = state.get("last_spam_check")
+    every = ramp_cfg["spam_check_every_days"]
+    if not last:
+        print("  Spam check: never done. Run `outreach-send --spam-check you@outlook.com`.")
+    else:
+        age = (datetime.date.today() - datetime.date.fromisoformat(last["date"])).days
+        due = "  <- due, run one" if age >= every else ""
+        print(f"  Spam check: {last['result']} ({age} day(s) ago){due}")
 
 
 def cmd_replies(args, cfg):
@@ -556,7 +712,7 @@ COMMANDS = {
     "stage": cmd_stage, "preview": cmd_preview, "replies": cmd_replies,
     "followup": cmd_followup, "migrate": cmd_migrate,
     "backfill-dates": cmd_backfill_dates, "add": cmd_add,
-    "from-apollo": cmd_from_apollo,
+    "from-apollo": cmd_from_apollo, "health": cmd_health,
 }
 
 
@@ -574,6 +730,11 @@ def main():
             p.add_argument("file", help="JSON file: a list of leads (objects)")
             p.add_argument("--dry-run", action="store_true",
                            help="show what would be added, change nothing")
+        if name == "health":
+            p.add_argument("--spam-check", choices=["inbox", "spam"],
+                           help="record where your spam-check email landed")
+            p.add_argument("--no-imap", action="store_true",
+                           help="skip checking Gmail for bounces")
         if name == "from-apollo":
             p.add_argument("file", help="Apollo saved-contacts search result (JSON)")
             p.add_argument("-o", "--out", required=True, help="leads JSON file to write")

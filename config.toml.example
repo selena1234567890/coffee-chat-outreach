@@ -28,6 +28,9 @@ do_not_contact = "data/do_not_contact.csv"   # people never to cold email (priva
 [templates]
 coffee_chat = "templates/coffee_chat.txt"
 referral = "templates/referral.txt"
+followup = "templates/followup.txt"
+# 2-3 versions of a type, so not every email has the same wording, e.g.:
+# coffee_chat = ["templates/coffee_chat_1.txt", "templates/coffee_chat_2.txt"]
 
 [pacing]
 batch_size = 14            # most emails per day in total; do not blast
@@ -74,6 +77,30 @@ max_email_age_years = 2
 handpicked_sources = ["chrome_extension_linkedin"]
 handpicked_since = "2026-10-31"
 
+# Daily volume ramp. The day's emails (new + follow-ups) follow these steps; within a
+# day they're split between types like [daily] (6:8 -> about 3:4). Moves up a step only
+# after a full step with no warning sign. Warning signs (bounces over the limit, a
+# Gmail sending-limit error, a spam check that landed in spam) pause sending for
+# pause_days, then go down one step. See `outreach health`.
+[ramp]
+enabled = true
+steps = [[13, 3], [18, 7], [25, 7], [35, 0]]   # [emails per day, days]; 0 days = stay
+pause_days = 2
+bounce_limit_percent = 3
+bounce_window = 50           # bounce rate over your last 50 emails
+spam_check_every_days = 3    # remind you to run a spam check this often
+
+# One follow-up (in the same email thread, using templates/followup.txt) to people
+# who haven't replied after this many business days. Never more than one per person.
+[followup]
+enabled = true
+after_business_days = 3
+
+# Wait a random time between emails so they don't all go out at once.
+[sending]
+min_gap_seconds = 60
+max_gap_seconds = 180
+
 # Share of each day's emails per company tier (percent). Every tier with a share
 # above 0 gets at least 1 a day; slots a tier can't fill go to the best people left.
 # Compare reply rates by tier in `outreach status` and adjust.
@@ -96,3 +123,8 @@ chinese = "data/chinese_surnames.txt"
 # The ONE thing you specify: what kind of internships to target. The agent /
 # internship-scout uses this as its search brief.
 area = "<e.g. Machine Learning, scientific computing, physics simulation; remote, unpaid>"
+
+# Values that are the same in every email; use them in any template as {{name}}.
+# A column with the same name in your spreadsheet wins over these.
+[blanks]
+resume_link = "<link to your resume, e.g. a Google Drive 'anyone with the link' URL>"

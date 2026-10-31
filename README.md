@@ -65,6 +65,22 @@ People held back by a limit stay in the queue for another day. A `type` you fill
 always wins. `outreach status` shows reply rates by type, tier and priority group, so you can tune
 the numbers after a week or two.
 
+### Safer sending (all adjustable in `config.toml`)
+
+| Feature | Setting | Default |
+|---|---|---|
+| Volume ramp | `[ramp].steps` | 13/day for 3 days → 18 for 7 → 25 for 7 → 35 max, from your first real send; split between types like `[daily]` |
+| Warning signs → pause | `[ramp]` | bounces over 3% of your last 50 emails, a Gmail sending-limit error, or a spam check in spam → pause 2 days, then one step down |
+| Spacing | `[sending]` | random 60–180 seconds between emails |
+| Follow-up | `[followup]` | one follow-up after 3 business days with no reply, in the same email thread (`templates/followup.txt`) |
+| Template versions | `[templates]` | a type can list 2–3 files; each person always gets the same one, and the version is logged |
+| Shared blanks | `[blanks]` | e.g. `resume_link`, usable in any template as `{{resume_link}}` (send a link, not an attachment) |
+
+Daily check-up: `outreach health` checks Gmail for bounces, shows the ramp step and any pause, and
+reminds you to run a spam check (`outreach-send --spam-check you@outlook.com`, then
+`outreach health --spam-check inbox|spam`). Run `outreach backfill-dates --apply` before staging so
+nobody who replied gets a follow-up.
+
 ### Finding people (Agent 1: `.claude/agents/contact-finder.md`)
 
 | Round | Where people come from | Cost |

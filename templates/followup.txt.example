@@ -1,0 +1,11 @@
+TO: {{contact_email}}
+SUBJECT: Re: {{original_subject}}
+FROM: Your Name <you@gmail.com>
+
+Hi {{first_name}},
+
+<Write your own short follow-up here. Example:>
+I wanted to follow up on my email from last week in case it got buried. I know you're busy, so no worries at all if now isn't a good time.
+
+Thank you again,
+Your Name
