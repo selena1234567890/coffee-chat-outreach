@@ -109,7 +109,11 @@ DEFAULT_SEARCH = {
 # tolerated on read and extended by `outreach migrate`.
 SENT_LOG_FIELDS = ["contact_email", "contact_name", "company", "role",
                    "subject", "note", "type", "template_version", "subject_sent",
-                   "message_id", "sent_at", "last_reply", "bounced_at"]
+                   "message_id", "sent_at", "last_reply", "bounced_at", "outcome",
+                   "outcome_at"]
+# What can happen after an email; the first four count as a good result.
+POSITIVE_OUTCOMES = ("coffee_chat_booked", "referral_given", "interview", "offer")
+OUTCOMES = POSITIVE_OUTCOMES + ("not_interested", "no_reply")
 
 # Embedded so `outreach setup` can scaffold a config without a shipped example file
 # (works for any install mode, editable or wheel).

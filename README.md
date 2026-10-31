@@ -81,6 +81,17 @@ reminds you to run a spam check (`outreach-send --spam-check you@outlook.com`, t
 `outreach health --spam-check inbox|spam`). Run `outreach backfill-dates --apply` before staging so
 nobody who replied gets a follow-up.
 
+### Tracking what works
+
+- `outreach report`: bounce, reply and good-result rates, overall and split by type, template
+  version, tier, priority group, source (hand-picked / web / Apollo), personal line (real fact /
+  plain), and open intern roles; replies to the first email vs after the follow-up; time to reply;
+  Apollo credits per reply; and sending health. Groups under 20 people are marked "too few to judge".
+- `outreach mark <email> <outcome>`: record what happened. Outcomes: `coffee_chat_booked`,
+  `referral_given`, `interview`, `offer` (these count as good results), `not_interested`,
+  `no_reply`.
+- Replies come from `outreach backfill-dates --apply`; run it before the report.
+
 ### Finding people (Agent 1: `.claude/agents/contact-finder.md`)
 
 | Round | Where people come from | Cost |

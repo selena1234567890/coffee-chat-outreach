@@ -20,6 +20,7 @@ import collections
 import datetime
 import json
 import os
+import statistics
 import subprocess
 import sys
 
@@ -416,7 +417,11 @@ def cmd_health(args, cfg):
             resume = common.record_warning(cfg, f"bounce rate {rate:.0%}")
             print(f"  Too many bounces: pausing until {resume}, one ramp step down.")
 
-    _, sent_rows = _safe_rows(sent_log)
+    _print_health(cfg, _safe_rows(sent_log)[1])
+
+
+def _print_health(cfg, sent_rows):
+    ramp_cfg = {**common.DEFAULT_RAMP, **(cfg.get("ramp") or {})}
     status = common.ramp_status(cfg, first_send=common.first_send_date(sent_rows))
     state = common.load_state(cfg)
     steps = ramp_cfg["steps"]
@@ -437,6 +442,164 @@ def cmd_health(args, cfg):
         age = (datetime.date.today() - datetime.date.fromisoformat(last["date"])).days
         due = "  <- due, run one" if age >= every else ""
         print(f"  Spam check: {last['result']} ({age} day(s) ago){due}")
+
+
+MIN_GROUP = 20  # below this many people, a group's rates are too noisy to act on
+
+
+def _iso_dt(text):
+    try:
+        return datetime.datetime.strptime((text or "").strip(), "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+
+
+def person_results(sent_rows, cfg):
+    """One summary per person emailed: their first email's details and what happened.
+
+    Replies come from last_reply (refresh with `outreach backfill-dates --apply`); a
+    reply that came after the follow-up was sent counts as a follow-up reply.
+    """
+    people = {}
+    for r in sent_rows:
+        email = common.normalize_email(r.get("contact_email"))
+        if not email:
+            continue
+        p = people.setdefault(email, {"first": None, "followup": None, "rows": []})
+        p["rows"].append(r)
+        p["followup" if _is_followup(r) else "first"] = r
+    out = []
+    for p in people.values():
+        first, fu = p["first"], p["followup"]
+        if first is None:
+            continue
+        replied_at = max((r.get("last_reply") or "").strip() for r in p["rows"])
+        bounced = any((r.get("bounced_at") or "").strip() for r in p["rows"])
+        sent_at, reply_dt = _iso_dt(first.get("sent_at")), _iso_dt(replied_at)
+        fu_sent = (fu or {}).get("sent_at", "")
+        if (first.get("personal_source") or "").strip():
+            line = "real fact"
+        elif (first.get("personal_line") or "").strip():
+            line = "plain line"
+        else:
+            line = "none"
+        tier = common.company_tier(first, cfg)
+        out.append({
+            "row": first,
+            "bounced": bounced,
+            "replied": bool(replied_at) and not bounced,
+            "replied_after_followup": bool(replied_at and fu_sent and replied_at > fu_sent),
+            "followup_sent": bool(fu_sent),
+            "days_to_reply": ((reply_dt - sent_at).total_seconds() / 86400
+                              if reply_dt and sent_at else None),
+            "outcome": (first.get("outcome") or "").strip(),
+            "groups": {
+                "type": [(first.get("type") or "").strip() or "default"],
+                "template version": [(first.get("template_version") or "").strip()
+                                     or "unknown"],
+                "tier": ["not listed" if tier == common.UNKNOWN_TIER else f"tier {tier}"],
+                "priority": common.priority_groups(first, cfg) or ["none"],
+                "source": [(first.get("source") or "").strip() or "unknown"],
+                "personal line": [line],
+                "open intern roles": ["yes" if common.has_open_roles(first) else "no/unknown"],
+            },
+        })
+    return out
+
+
+def _rate(part, whole):
+    return f"{part / whole:4.0%}" if whole else "  - "
+
+
+def _print_group_table(results, dimension):
+    stats = collections.defaultdict(collections.Counter)
+    for p in results:
+        for g in p["groups"][dimension]:
+            c = stats[g]
+            c["people"] += 1
+            c["bounced"] += p["bounced"]
+            c["replied"] += p["replied"]
+            c["good"] += p["outcome"] in common.POSITIVE_OUTCOMES
+    print(f"\nBy {dimension}:")
+    for g, c in sorted(stats.items(), key=lambda kv: -kv[1]["people"]):
+        delivered = c["people"] - c["bounced"]
+        small = "  (too few to judge)" if c["people"] < MIN_GROUP else ""
+        print(f"  {g:<22} people {c['people']:>4}   bounced {_rate(c['bounced'], c['people'])}"
+              f"   replied {_rate(c['replied'], delivered)}   good results {c['good']:>3}"
+              f"{small}")
+
+
+def cmd_report(args, cfg):
+    """The numbers to tune the tool by: reply, bounce and good-result rates, split by
+    type, template version, tier, priority, source, personal line and open roles;
+    first email vs follow-up; time to reply; Apollo credits per reply; health."""
+    _, _, sent_log = _paths(cfg)
+    _, sent_rows = _safe_rows(sent_log)
+    results = person_results(sent_rows, cfg)
+    if not results:
+        print("Nothing sent yet, so nothing to report.")
+        _print_health(cfg, sent_rows)
+        return
+
+    n = len(results)
+    bounced = sum(p["bounced"] for p in results)
+    replied = [p for p in results if p["replied"]]
+    after_fu = sum(p["replied_after_followup"] for p in replied)
+    outcomes = collections.Counter(p["outcome"] for p in results if p["outcome"])
+    good = sum(outcomes[o] for o in common.POSITIVE_OUTCOMES)
+    print(f"=== Outreach report: {n} people emailed ===")
+    print(f"  Bounced: {bounced} ({_rate(bounced, n).strip()})   "
+          f"Replied: {len(replied)} ({_rate(len(replied), n - bounced).strip()} of delivered)"
+          f"   Good results: {good}")
+    print(f"  Replies to the first email: {len(replied) - after_fu}   after the follow-up: "
+          f"{after_fu}   (follow-ups sent: {sum(p['followup_sent'] for p in results)})")
+    days = sorted(p["days_to_reply"] for p in replied if p["days_to_reply"] is not None)
+    if days:
+        fu_days = (cfg.get("followup") or common.DEFAULT_FOLLOWUP)["after_business_days"]
+        within = sum(d <= fu_days + 2 for d in days)  # ~ the follow-up wait, in calendar days
+        print(f"  Time to reply: median {statistics.median(days):.1f} days "
+              f"(fastest {days[0]:.1f}, slowest {days[-1]:.1f}); "
+              f"{_rate(within, len(days)).strip()} replied within about "
+              f"{fu_days} business days (before a follow-up)")
+    if outcomes:
+        print("  Outcomes: " + ", ".join(f"{o} {outcomes[o]}" for o in common.OUTCOMES
+                                         if outcomes[o]))
+    for dimension in results[0]["groups"]:
+        _print_group_table(results, dimension)
+    print(f"\n(Groups under {MIN_GROUP} people are too small to judge yet; replies come "
+          "from `outreach backfill-dates --apply`.)")
+
+    apollo = [p for p in results
+              if p["groups"]["source"][0] in (common.HAND_PICKED, common.AGENT_FOUND)]
+    if apollo:
+        apollo_replies = sum(p["replied"] for p in apollo)
+        per = f"{len(apollo) / apollo_replies:.1f}" if apollo_replies else "no replies yet"
+        print(f"\nApollo credits: about {len(apollo)} used (1 per email revealed) for "
+              f"{apollo_replies} replies -> credits per reply: {per}")
+    _print_health(cfg, sent_rows)
+
+
+def cmd_mark(args, cfg):
+    """Record what happened with someone you emailed (shown in `outreach report`)."""
+    _, _, sent_log = _paths(cfg)
+    outcome = args.outcome.strip().lower()
+    if outcome not in common.OUTCOMES:
+        raise SystemExit(f"ERROR: outcome must be one of: {', '.join(common.OUTCOMES)}")
+    fields, rows = _safe_rows(sent_log)
+    email = common.normalize_email(args.email)
+    hits = [r for r in rows if common.normalize_email(r.get("contact_email")) == email
+            and not _is_followup(r)]
+    if not hits:
+        raise SystemExit(f"ERROR: {args.email} is not in {os.path.basename(sent_log)}.")
+    for r in hits:
+        r["outcome"] = outcome
+        r["outcome_at"] = datetime.date.today().isoformat()
+    fields = list(fields) + [f for f in ("outcome", "outcome_at") if f not in fields]
+    common.backup(sent_log)
+    common.write_db(sent_log, fields, rows)
+    r = hits[0]
+    print(f"Marked {r.get('first_name', '')} {r.get('last_name', '')} at "
+          f"{r.get('company', '')}: {outcome}")
 
 
 def cmd_replies(args, cfg):
@@ -712,7 +875,8 @@ COMMANDS = {
     "stage": cmd_stage, "preview": cmd_preview, "replies": cmd_replies,
     "followup": cmd_followup, "migrate": cmd_migrate,
     "backfill-dates": cmd_backfill_dates, "add": cmd_add,
-    "from-apollo": cmd_from_apollo, "health": cmd_health,
+    "from-apollo": cmd_from_apollo, "health": cmd_health, "mark": cmd_mark,
+    "report": cmd_report,
 }
 
 
@@ -730,6 +894,9 @@ def main():
             p.add_argument("file", help="JSON file: a list of leads (objects)")
             p.add_argument("--dry-run", action="store_true",
                            help="show what would be added, change nothing")
+        if name == "mark":
+            p.add_argument("email", help="the person's email address")
+            p.add_argument("outcome", help=" / ".join(common.OUTCOMES))
         if name == "health":
             p.add_argument("--spam-check", choices=["inbox", "spam"],
                            help="record where your spam-check email landed")
