@@ -126,7 +126,8 @@ For each approved person:
    - Only use a fact you actually found, and only if you are sure it is **this**
      person (name AND company or role match). Never guess. Never invent.
    - Write `personal_line`: ONE sentence (two at most) in the user's voice. It comes
-     right after "I'm Selena Su, a junior at Emory studying Math and Computer Science."
+     right after "My name is Selena Su. I'm a junior at Emory University majoring in
+     Mathematics and Computer Science, minoring in Business."
      and is the only line about the person, so it must mention their role or company.
      Style: "I came across ... and was genuinely impressed by ...", e.g.
      "I came across your KDD 2025 talk on ranking models for Ads and was genuinely
