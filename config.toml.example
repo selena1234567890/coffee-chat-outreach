@@ -66,7 +66,10 @@ titles = ["Data Scientist", "Data Analyst", "Machine Learning Engineer", "AI Eng
 manager_titles = true        # also search managers of these roles
 locations = ["United States"]
 max_credits_per_run = 25     # Apollo credits (1 per email found); the agent asks first
-required_email_status = "verified"   # only add people whose email Apollo verified
+accepted_email_statuses = ["verified", "public"]
+# verified = Apollo checked it; public = the person published it themselves (paper,
+# personal site, GitHub) - needs email_source, and email_seen within max_email_age_years
+max_email_age_years = 2
 # Your hand-picks: people you save with the Apollo LinkedIn extension on/after this date.
 handpicked_sources = ["chrome_extension_linkedin"]
 handpicked_since = "2026-10-31"

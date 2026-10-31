@@ -483,9 +483,17 @@ def check_lead(r, cfg, known_emails):
         return "not an email address"
     if email in known_emails:
         return "already in queue, batch or sent log"
-    need = (cfg.get("search") or common.DEFAULT_SEARCH).get("required_email_status")
-    if need and (r.get("email_status") or "").strip().lower() != need.lower():
-        return f"email status is {r.get('email_status') or 'unknown'!r}, need {need!r}"
+    search = {**common.DEFAULT_SEARCH, **(cfg.get("search") or {})}
+    accepted = [s.lower() for s in search["accepted_email_statuses"]]
+    status = (r.get("email_status") or "").strip().lower()
+    if status not in accepted:
+        return f"email status is {status or 'unknown'!r}, need one of {accepted}"
+    if status == common.PUBLIC:
+        if not (r.get("email_source") or "").strip():
+            return "public email without email_source (where it was published)"
+        seen = common.years_ago(r.get("email_seen"))
+        if seen is not None and seen > search["max_email_age_years"]:
+            return f"public email last seen {seen:.1f} years ago (too old, may bounce)"
     if common.on_do_not_contact(r, cfg):
         return "on the do-not-contact list"
     if common.too_small(r, cfg):

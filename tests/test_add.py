@@ -4,6 +4,7 @@ queue) and for showing agent-written lines as `>> CHECK:` in preview.
 Hermetic: temp files, fake SMTP, no network or account.
 """
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -160,3 +161,42 @@ def test_from_apollo_output_goes_through_add(tmp_path):
     outreach_cli.cmd_add(argparse.Namespace(file=str(out), dry_run=False), cfg)
     rows = common.read_rows(cfg["files"]["queue"])[1]
     assert rows[0]["source"] == "hand_picked"
+
+
+# --- public emails found on the web (email_status = public) ---------------------
+
+def _web_lead(email, **kw):
+    lead = _lead(email, email_status="public", source="web",
+                 email_source="https://arxiv.org/abs/2601.00001",
+                 email_seen=(datetime.date.today() - datetime.timedelta(days=120)).isoformat())
+    return {**lead, **kw}
+
+
+def test_public_email_with_source_is_accepted(tmp_path):
+    rows = _add(tmp_path, _cfg(tmp_path), [_web_lead("w@google.com")])
+    assert rows[0]["email_status"] == "public"
+    assert rows[0]["email_source"].startswith("https://arxiv.org")
+
+
+def test_public_email_needs_a_source(tmp_path, capsys):
+    assert _add(tmp_path, _cfg(tmp_path), [_web_lead("w@google.com", email_source="")]) == []
+    assert "public email without email_source" in capsys.readouterr().out
+
+
+def test_old_public_email_is_rejected(tmp_path, capsys):
+    rows = _add(tmp_path, _cfg(tmp_path), [_web_lead("w@google.com", email_seen="2021-05")])
+    assert rows == []
+    assert "too old, may bounce" in capsys.readouterr().out
+
+
+def test_accepted_statuses_are_adjustable(tmp_path, capsys):
+    cfg = _cfg(tmp_path)
+    cfg["search"] = {**common.DEFAULT_SEARCH, "accepted_email_statuses": ["verified"]}
+    assert _add(tmp_path, cfg, [_web_lead("w@google.com")]) == []
+    assert "need one of ['verified']" in capsys.readouterr().out
+
+
+def test_check_line_shows_where_public_email_came_from(tmp_path, capsys):
+    _add(tmp_path, _cfg(tmp_path), [_web_lead("w@google.com")])
+    assert ">> CHECK email: published at https://arxiv.org/abs/2601.00001" in \
+        capsys.readouterr().out

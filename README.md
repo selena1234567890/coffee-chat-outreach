@@ -65,6 +65,20 @@ People held back by a limit stay in the queue for another day. A `type` you fill
 always wins. `outreach status` shows reply rates by type, tier and priority group, so you can tune
 the numbers after a week or two.
 
+### Finding people (Agent 1: `.claude/agents/contact-finder.md`)
+
+| Round | Where people come from | Cost |
+|---|---|---|
+| 0 | People you save with the Apollo LinkedIn extension (`outreach from-apollo` picks them out) | 1 Apollo credit each, when you save |
+| W | The agent's web search: people + an email they **published themselves** (papers, personal sites, GitHub) | free |
+| 1–2 | Apollo people search + email reveal (needs a paid Apollo plan) | 1 credit per email |
+
+Every round ends with `outreach add <file> --dry-run`, so you see each person, the agent's
+`>> CHECK:` personal line with its source, and (for web emails) where the email was published,
+before anything enters the queue. `outreach add` only accepts `[search].accepted_email_statuses`
+(`verified` from Apollo, `public` with an `email_source` seen within `max_email_age_years`).
+Emails are never guessed.
+
 Extra CSV columns the rules read: `last_name`, `company_size`, `title`, `start_date`
 (`YYYY-MM-DD`, `YYYY-MM` or `YYYY`), `school`, `priority_tags`, `tier`, `open_intern_roles`,
 `linkedin_url`.

@@ -64,14 +64,17 @@ DEFAULT_PRIORITY = {"schools": [], "tags": [], "surname_lists": {},
                     "hand_picked_unlisted_tier": 1}
 # `source` values: who found the person (compare reply rates by source in `status`).
 HAND_PICKED = "hand_picked"   # you saved them yourself (Apollo extension)
-AGENT_FOUND = "agent"         # the contact finder's search found them
+AGENT_FOUND = "agent"         # the contact finder's Apollo search found them
+WEB_FOUND = "web"             # the contact finder found them + a public email on the web
+PUBLIC = "public"             # email_status for an email the person published themselves
 
 # Columns a lead (one person to contact) can have, in the order a new queue file uses.
 # Any other column is kept too and can be used as a {{blank}} in templates.
 LEAD_FIELDS = ["type", "contact_email", "first_name", "last_name", "company", "company_size",
                "title", "start_date", "school", "previous_company", "tier",
                "open_intern_roles", "priority_tags", "linkedin_url", "email_status",
-               "personal_line", "personal_source", "connection", "target_role", "job_link",
+               "email_source", "email_seen", "personal_line", "personal_source",
+               "connection", "target_role", "job_link",
                "subject", "source", "apollo_id", "found_at"]
 # What the contact finder searches for (see [search] in config.toml).
 DEFAULT_SEARCH = {
@@ -82,7 +85,8 @@ DEFAULT_SEARCH = {
     "manager_titles": True,       # also search managers of these roles
     "locations": ["United States"],
     "max_credits_per_run": 25,
-    "required_email_status": "verified",
+    "accepted_email_statuses": ["verified", "public"],
+    "max_email_age_years": 2,
     # Hand-picks: contacts saved from these Apollo sources on/after this date.
     "handpicked_sources": ["chrome_extension_linkedin"],
     "handpicked_since": "2026-10-31",
@@ -157,7 +161,10 @@ titles = ["Data Scientist", "Data Analyst", "Machine Learning Engineer", "AI Eng
 manager_titles = true        # also search managers of these roles
 locations = ["United States"]
 max_credits_per_run = 25     # Apollo credits (1 per email found); the agent asks first
-required_email_status = "verified"   # only add people whose email Apollo verified
+accepted_email_statuses = ["verified", "public"]
+# verified = Apollo checked it; public = the person published it themselves (paper,
+# personal site, GitHub) - needs email_source, and email_seen within max_email_age_years
+max_email_age_years = 2
 # Your hand-picks: people you save with the Apollo LinkedIn extension on/after this date.
 handpicked_sources = ["chrome_extension_linkedin"]
 handpicked_since = "2026-10-31"
@@ -426,17 +433,21 @@ def on_do_not_contact(row, cfg):
     return False
 
 
-def years_at_company(row, today=None):
-    """Years since `start_date` (YYYY-MM-DD, YYYY-MM or YYYY), or None if unknown."""
-    m = re.match(r"(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?",
-                 (row.get("start_date") or "").strip())
+def years_ago(date_text, today=None):
+    """Years since a date written YYYY-MM-DD, YYYY-MM or YYYY; None if not a date."""
+    m = re.match(r"(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?", (date_text or "").strip())
     if not m:
         return None
     try:
-        start = datetime.date(int(m[1]), int(m[2] or 1), int(m[3] or 1))
+        then = datetime.date(int(m[1]), int(m[2] or 1), int(m[3] or 1))
     except ValueError:
         return None
-    return ((today or datetime.date.today()) - start).days / 365.25
+    return ((today or datetime.date.today()) - then).days / 365.25
+
+
+def years_at_company(row, today=None):
+    """Years since `start_date` (YYYY-MM-DD, YYYY-MM or YYYY), or None if unknown."""
+    return years_ago(row.get("start_date"), today)
 
 
 def pick_type(row, cfg, today=None):
@@ -710,13 +721,16 @@ def missing_fields(row, headers, body):
 
 
 def print_check_line(row, indent="      "):
-    """Print an agent-written personal line, marked so it's easy to review before sending."""
+    """Print what the agent found (personal line, public email source), marked so it's
+    easy to review before sending."""
     line = (row.get("personal_line") or "").strip()
-    if not line:
-        return
-    print(f'{indent}>> CHECK: "{line}"')
-    source = (row.get("personal_source") or "").strip()
-    print(f"{indent}   " + (f"source: {source}" if source else "(no source: plain line)"))
+    if line:
+        print(f'{indent}>> CHECK: "{line}"')
+        source = (row.get("personal_source") or "").strip()
+        print(f"{indent}   " + (f"source: {source}" if source else "(no source: plain line)"))
+    if (row.get("email_status") or "").strip().lower() == PUBLIC:
+        seen = (row.get("email_seen") or "").strip() or "date unknown"
+        print(f"{indent}>> CHECK email: published at {row.get('email_source')} ({seen})")
 
 
 def load_template(template_path):
