@@ -144,6 +144,8 @@ referral = "templates/referral.txt"
 followup = "templates/followup.txt"
 # 2-3 versions of a type, so not every email has the same wording, e.g.:
 # coffee_chat = ["templates/coffee_chat_1.txt", "templates/coffee_chat_2.txt"]
+# A <type>_tier<N> key replaces that type for companies in tier N, e.g. a
+# finance/consulting version: coffee_chat_tier2 = "templates/coffee_chat_tier2.txt"
 
 [pacing]
 batch_size = 14            # most emails per day in total; do not blast
@@ -346,7 +348,8 @@ def template_for(row, cfg):
     otherwise), so a typo never silently falls back to the wrong email. Without
     one, every row uses [files].template. A type may list several versions; each
     person always gets the same one (picked from their email address), so preview
-    and send match, and the choice is spread evenly across people.
+    and send match, and the choice is spread evenly across people. A key like
+    `coffee_chat_tier2` replaces `coffee_chat` for people at tier 2 companies.
     """
     templates = cfg.get("templates") or {}
     if not templates:
@@ -355,7 +358,7 @@ def template_for(row, cfg):
     if kind not in templates:
         raise ValueError(f"type {kind or '(blank)'!r} is not one of: "
                          f"{', '.join(sorted(templates))}")
-    choice = templates[kind]
+    choice = templates.get(f"{kind}_tier{company_tier(row, cfg)}", templates[kind])
     if not isinstance(choice, list):
         return choice
     digest = hashlib.sha256(normalize_email(row.get("contact_email")).encode()).hexdigest()

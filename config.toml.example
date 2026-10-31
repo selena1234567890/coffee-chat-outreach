@@ -31,6 +31,8 @@ referral = "templates/referral.txt"
 followup = "templates/followup.txt"
 # 2-3 versions of a type, so not every email has the same wording, e.g.:
 # coffee_chat = ["templates/coffee_chat_1.txt", "templates/coffee_chat_2.txt"]
+# A <type>_tier<N> key replaces that type for companies in tier N, e.g. a
+# finance/consulting version: coffee_chat_tier2 = "templates/coffee_chat_tier2.txt"
 
 [pacing]
 batch_size = 14            # most emails per day in total; do not blast

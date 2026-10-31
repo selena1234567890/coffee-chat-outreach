@@ -142,3 +142,14 @@ def test_stage_caps_people_per_company(tmp_path):
     assert [r["contact_email"] for r in staged] == ["b@x.com", "d@y.com"]
     _, queue = common.read_rows(files["queue"])
     assert [r["contact_email"] for r in queue] == ["c@x.com"]  # held, not deleted
+
+
+def test_tier_specific_template_replaces_the_type_for_that_tier():
+    cfg = {"templates": {"coffee_chat": ["c1.txt", "c2.txt"], "coffee_chat_tier2": "fin.txt",
+                         "referral": "r.txt"}}
+    assert common.template_for({"type": "coffee_chat", "tier": "2",
+                                "contact_email": "a@x.com"}, cfg) == "fin.txt"
+    assert common.template_for({"type": "coffee_chat", "tier": "1",
+                                "contact_email": "a@x.com"}, cfg) in ("c1.txt", "c2.txt")
+    assert common.template_for({"type": "referral", "tier": "2",
+                                "contact_email": "a@x.com"}, cfg) == "r.txt"

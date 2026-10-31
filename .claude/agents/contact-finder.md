@@ -125,12 +125,16 @@ For each approved person:
    WebSearch / WebFetch. Rules:
    - Only use a fact you actually found, and only if you are sure it is **this**
      person (name AND company or role match). Never guess. Never invent.
-   - Write `personal_line`: 1–2 short, natural sentences in plain English, e.g.
-     "I really enjoyed your KDD 2025 talk on ranking models for Ads."
+   - Write `personal_line`: ONE sentence (two at most) in the user's voice. It comes
+     right after "I'm Selena Su, a junior at Emory studying Math and Computer Science."
+     and is the only line about the person, so it must mention their role or company.
+     Style: "I came across ... and was genuinely impressed by ...", e.g.
+     "I came across your KDD 2025 talk on ranking models for Ads and was genuinely
+     impressed by your work as a Data Scientist at Google."
    - Put the page link in `personal_source`.
-   - If you find nothing solid, write a plain line from their role, e.g.
-     "Your work as a Machine Learning Engineer on Google's Search team is the kind of
-     work I hope to do." and leave `personal_source` empty.
+   - If you find nothing solid, use exactly this plain line, filled in:
+     "I came across your profile and was genuinely impressed by your work as a
+     <title> at <company>." and leave `personal_source` empty.
    - Never mention anything private (family, location, age, background, looks).
 4. Set `source` to `"agent"`. Do not set `type` (the tool decides it). Do not set `priority_tags` (the tool adds
    tags from the surname list); you may add `chinese` only if the profile itself shows
