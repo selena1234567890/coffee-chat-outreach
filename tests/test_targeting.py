@@ -275,3 +275,12 @@ def test_status_shows_reply_rates_by_source(tmp_path, capsys):
     outreach_cli.cmd_status(argparse.Namespace(), cfg)
     out = capsys.readouterr().out
     assert "source: hand_picked" in out and "source: agent" in out
+
+
+def test_big_tier_cannot_use_up_a_type_limit_before_small_tiers_get_theirs(tmp_path):
+    # 14 emails today, but only 10 referrals allowed and everyone is a referral person:
+    # tier 3 and tier 2 still get their shares before big tech fills the rest.
+    cfg = _cfg(tmp_path, daily={"coffee_chat": 4, "referral": 10},
+               company_limits={**common.DEFAULT_COMPANY_LIMITS, "large": 50})
+    staged, _ = _stage(cfg, _mixed_queue(20, 10, 5))
+    assert _tiers(staged) == {"3": 1, "2": 4, "1": 5}   # shares 8/4/1 of 14; 10 referrals

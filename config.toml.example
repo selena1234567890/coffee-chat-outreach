@@ -100,6 +100,8 @@ after_business_days = 3
 [sending]
 min_gap_seconds = 60
 max_gap_seconds = 180
+# Another inbox of yours (e.g. Outlook) for spam checks; Agent 2 uses it.
+spam_check_address = ""
 
 # Share of each day's emails per company tier (percent). Every tier with a share
 # above 0 gets at least 1 a day; slots a tier can't fill go to the best people left.

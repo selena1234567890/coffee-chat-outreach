@@ -69,7 +69,7 @@ DEFAULT_RAMP = {"enabled": True, "steps": [[13, 3], [18, 7], [25, 7], [35, 0]],
 # One follow-up to people who haven't replied after this many business days.
 DEFAULT_FOLLOWUP = {"enabled": True, "after_business_days": 3}
 # Random wait between emails at send time, so they don't all go out at once.
-DEFAULT_SENDING = {"min_gap_seconds": 60, "max_gap_seconds": 180}
+DEFAULT_SENDING = {"min_gap_seconds": 60, "max_gap_seconds": 180, "spam_check_address": ""}
 # Share of each day's emails per company tier, in percent.
 DEFAULT_TIER_SHARE = {1: 60, 2: 30, 3: 10}
 # Who is staged first. Empty by default; set yours in config.toml.
@@ -213,6 +213,8 @@ after_business_days = 3
 [sending]
 min_gap_seconds = 60
 max_gap_seconds = 180
+# Another inbox of yours (e.g. Outlook) for spam checks; Agent 2 uses it.
+spam_check_address = ""
 
 # Share of each day's emails per company tier (percent). Every tier with a share
 # above 0 gets at least 1 a day; slots a tier can't fill go to the best people left.

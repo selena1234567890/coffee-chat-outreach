@@ -92,6 +92,18 @@ nobody who replied gets a follow-up.
   `no_reply`.
 - Replies come from `outreach backfill-dates --apply`; run it before the report.
 
+### The daily routine (Agent 2: `.claude/agents/sender.md`)
+
+`outreach daily` runs the morning steps in order and **sends nothing**:
+1. replies and send dates from Gmail (so nobody who replied gets a follow-up),
+2. health (bounces, pause, ramp step, spam-check reminder),
+3. stage today's batch (follow-ups first, then new people by the rules),
+4. preview every email with its `>> CHECK` lines.
+
+Then `outreach-send --test` (to you), and `outreach-send --send` once you approve, then
+`outreach report`. Agent 2 does exactly this in two runs: **prepare** (daily + test email,
+then it stops and shows you the batch) and, only after you approve the number, **send**.
+
 ### Finding people (Agent 1: `.claude/agents/contact-finder.md`)
 
 | Round | Where people come from | Cost |

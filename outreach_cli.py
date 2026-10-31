@@ -243,7 +243,10 @@ def cmd_stage(args, cfg):
     used_today = collections.Counter(common.pick_type(r, cfg) for r in todays)
     used_tier = collections.Counter(common.company_tier(r, cfg) for r in todays
                                     if not _is_followup(r))
-    tier_cap = common.tier_caps(cfg, day_total)
+    # Tier shares are of today's NEW emails (follow-ups don't take a tier's share).
+    new_today = sum(used_tier.values())
+    followups_today = len(todays) - new_today + len(followups)
+    tier_cap = common.tier_caps(cfg, min(n + new_today, day_total - followups_today))
 
     def prepared(r):
         out = dict(r, type=common.pick_type(r, cfg), tier=str(common.company_tier(r, cfg)))
@@ -258,10 +261,16 @@ def cmd_stage(args, cfg):
     ranked = sorted(((r, prepared(r)) for r in q_rows), key=rank)
     to_move, gone, why = [], set(), {}
     dropped, blocked = 0, []
-    # Pass 1 fills each tier up to its share of the day ([tier_share]); pass 2 gives
-    # any slots a tier couldn't use to the best people left, whatever their tier.
-    for by_share in (True, False):
-        for orig, r in ranked:
+    # Pass 1 fills each tier up to its share of the day ([tier_share]). When today has
+    # room for every tier's share, the smallest tiers go first so a big tier can't use
+    # up a type's daily limit before they get theirs; otherwise best first. Pass 2
+    # gives slots a tier couldn't use to the best people left, any tier.
+    if n >= sum(max(0, c - used_tier[t]) for t, c in tier_cap.items()):
+        first_pass = sorted(ranked, key=lambda pair: -int(pair[1]["tier"]))
+    else:
+        first_pass = ranked
+    for by_share, order in ((True, first_pass), (False, ranked)):
+        for orig, r in order:
             if id(orig) in gone:
                 continue
             email = common.normalize_email(r.get("contact_email"))
@@ -289,6 +298,7 @@ def cmd_stage(args, cfg):
                 per_company[_company(r)] += 1
                 used_today[kind] += 1
                 used_tier[tier] += 1
+    to_move.sort(key=lambda r: rank((None, r)))  # back to priority order
     waiting = collections.Counter(w for k, w in why.items() if k not in gone)
     leftover = [r for r in q_rows if id(r) not in gone]  # original order, unchanged
 
@@ -348,6 +358,7 @@ def _print_waiting(waiting, used_today, daily, used_tier, tier_cap):
 
 
 def cmd_preview(args, cfg):
+    sys.stdout.flush()  # print everything so far before the preview's own output
     # `-m` works whether installed as a wheel or run from a source checkout.
     rc = subprocess.run([PY, "-m", "send", "--config", cfg["config_path"]]).returncode
     if rc:
@@ -577,6 +588,37 @@ def cmd_report(args, cfg):
         print(f"\nApollo credits: about {len(apollo)} used (1 per email revealed) for "
               f"{apollo_replies} replies -> credits per reply: {per}")
     _print_health(cfg, sent_rows)
+
+
+def cmd_daily(args, cfg):
+    """The morning routine, in the right order. Never sends anything:
+    1. replies + send dates from Gmail (so nobody who replied gets a follow-up)
+    2. health: bounces, pause, ramp step, spam-check reminder
+    3. stage today's batch (follow-ups first, then new people, by the rules)
+    4. preview every email, with the >> CHECK lines to review
+    Then: `outreach-send --test`, read it, and `outreach-send --send` once you approve.
+    """
+    _, _, sent_log = _paths(cfg)
+    has_sent = bool(_safe_rows(sent_log)[1])
+    print("=== 1. Replies from Gmail ===")
+    if args.no_imap:
+        print("Skipped (--no-imap): follow-ups use the replies already in the sent log.")
+    elif has_sent:
+        cmd_backfill_dates(argparse.Namespace(apply=True), cfg)
+    else:
+        print("Nothing sent yet.")
+    print("\n=== 2. Health ===")
+    cmd_health(argparse.Namespace(spam_check=None, no_imap=args.no_imap or not has_sent), cfg)
+    _, sent_rows = _safe_rows(sent_log)
+    if common.ramp_status(cfg, first_send=common.first_send_date(sent_rows))["per_day"] == 0:
+        print("\nPaused, so nothing is staged today.")
+        return
+    print("\n=== 3. Today's batch ===")
+    cmd_stage(argparse.Namespace(n=None), cfg)
+    print("\n=== 4. Preview (check every >> CHECK line) ===")
+    cmd_preview(argparse.Namespace(), cfg)
+    print("\nNext: `outreach-send --test` (to you), read it, then "
+          "`outreach-send --send` once you approve.")
 
 
 def cmd_mark(args, cfg):
@@ -876,7 +918,7 @@ COMMANDS = {
     "followup": cmd_followup, "migrate": cmd_migrate,
     "backfill-dates": cmd_backfill_dates, "add": cmd_add,
     "from-apollo": cmd_from_apollo, "health": cmd_health, "mark": cmd_mark,
-    "report": cmd_report,
+    "report": cmd_report, "daily": cmd_daily,
 }
 
 
@@ -894,6 +936,9 @@ def main():
             p.add_argument("file", help="JSON file: a list of leads (objects)")
             p.add_argument("--dry-run", action="store_true",
                            help="show what would be added, change nothing")
+        if name == "daily":
+            p.add_argument("--no-imap", action="store_true",
+                           help="don't check Gmail (replies/bounces); for offline runs")
         if name == "mark":
             p.add_argument("email", help="the person's email address")
             p.add_argument("outcome", help=" / ".join(common.OUTCOMES))
