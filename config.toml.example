@@ -67,6 +67,9 @@ manager_titles = true        # also search managers of these roles
 locations = ["United States"]
 max_credits_per_run = 25     # Apollo credits (1 per email found); the agent asks first
 required_email_status = "verified"   # only add people whose email Apollo verified
+# Your hand-picks: people you save with the Apollo LinkedIn extension on/after this date.
+handpicked_sources = ["chrome_extension_linkedin"]
+handpicked_since = "2026-10-31"
 
 # Share of each day's emails per company tier (percent). Every tier with a share
 # above 0 gets at least 1 a day; slots a tier can't fill go to the best people left.
@@ -79,7 +82,8 @@ required_email_status = "verified"   # only add people whose email Apollo verifi
 # Who gets staged first: a matching `school`, or a tag in `priority_tags`.
 [priority]
 schools = ["Emory"]
-tags = ["chinese"]
+tags = ["chinese", "hand_picked"]   # hand_picked = people you saved yourself in Apollo
+hand_picked_unlisted_tier = 1       # tier for hand-picked people at unlisted companies
 
 # A tag is added automatically when `last_name` is in that file (one name per line).
 [priority.surname_lists]

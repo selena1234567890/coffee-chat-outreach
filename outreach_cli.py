@@ -80,7 +80,8 @@ def _print_reply_rates(sent_log, cfg):
     for r in rows:
         tier = common.company_tier(r, cfg)
         groups = [f"type: {(r.get('type') or '').strip() or 'default'}",
-                  "tier: " + ("not listed" if tier == common.UNKNOWN_TIER else str(tier))]
+                  "tier: " + ("not listed" if tier == common.UNKNOWN_TIER else str(tier)),
+                  f"source: {(r.get('source') or '').strip() or 'unknown'}"]
         groups += [f"priority: {g}" for g in common.priority_groups(r, cfg)] or ["priority: none"]
         for g in groups:
             sent[g] += 1
@@ -424,6 +425,51 @@ def cmd_backfill_dates(args, cfg):
           f"backup in .backups/).")
 
 
+def apollo_contacts_to_leads(data, cfg):
+    """Turn an Apollo saved-contacts search result into hand-picked leads.
+
+    Keeps contacts saved from [search].handpicked_sources on/after handpicked_since.
+    """
+    search = {**common.DEFAULT_SEARCH, **(cfg.get("search") or {})}
+    sources = {s.lower() for s in search["handpicked_sources"]}
+    since = str(search["handpicked_since"])
+    leads = []
+    for c in data.get("contacts", []):
+        if (c.get("source") or "").lower() not in sources:
+            continue
+        if (c.get("created_at") or "")[:10] < since:
+            continue
+        leads.append({
+            "first_name": c.get("first_name") or "",
+            "last_name": c.get("last_name") or "",
+            "contact_email": c.get("email") or "",
+            "email_status": c.get("email_status") or "",
+            "title": c.get("title") or "",
+            "company": c.get("organization_name") or "",
+            "linkedin_url": c.get("linkedin_url") or "",
+            "apollo_id": c.get("person_id") or "",
+            "source": common.HAND_PICKED,
+        })
+    return leads
+
+
+def cmd_from_apollo(args, cfg):
+    """Convert a saved Apollo contacts search (JSON, may be a saved tool-result file)
+    into a leads file for `outreach add`. Only your hand-picks are kept."""
+    try:
+        raw = open(args.file, encoding="utf-8").read()
+        data = json.loads(raw[raw.index("{"):])
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"ERROR: can't read Apollo contacts from {args.file}: {e}")
+    leads = apollo_contacts_to_leads(data, cfg)
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump(leads, f, indent=2, ensure_ascii=False)
+    total = len(data.get("contacts", []))
+    print(f"{len(leads)} hand-picked contact(s) of {total} -> {args.out}")
+    for lead in leads:
+        print(f"  {lead['first_name']} {lead['last_name']}, {lead['title']} at {lead['company']}")
+
+
 ADD_REQUIRED = ("contact_email", "first_name", "company")
 
 
@@ -502,6 +548,7 @@ COMMANDS = {
     "stage": cmd_stage, "preview": cmd_preview, "replies": cmd_replies,
     "followup": cmd_followup, "migrate": cmd_migrate,
     "backfill-dates": cmd_backfill_dates, "add": cmd_add,
+    "from-apollo": cmd_from_apollo,
 }
 
 
@@ -519,6 +566,9 @@ def main():
             p.add_argument("file", help="JSON file: a list of leads (objects)")
             p.add_argument("--dry-run", action="store_true",
                            help="show what would be added, change nothing")
+        if name == "from-apollo":
+            p.add_argument("file", help="Apollo saved-contacts search result (JSON)")
+            p.add_argument("-o", "--out", required=True, help="leads JSON file to write")
         if name == "backfill-dates":
             p.add_argument("--apply", action="store_true",
                            help="write the dates (default: dry-run preview)")

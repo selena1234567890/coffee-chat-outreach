@@ -60,7 +60,11 @@ DEFAULT_DAILY = {"coffee_chat": 6, "referral": 8}
 # Share of each day's emails per company tier, in percent.
 DEFAULT_TIER_SHARE = {1: 60, 2: 30, 3: 10}
 # Who is staged first. Empty by default; set yours in config.toml.
-DEFAULT_PRIORITY = {"schools": [], "tags": [], "surname_lists": {}}
+DEFAULT_PRIORITY = {"schools": [], "tags": [], "surname_lists": {},
+                    "hand_picked_unlisted_tier": 1}
+# `source` values: who found the person (compare reply rates by source in `status`).
+HAND_PICKED = "hand_picked"   # you saved them yourself (Apollo extension)
+AGENT_FOUND = "agent"         # the contact finder's search found them
 
 # Columns a lead (one person to contact) can have, in the order a new queue file uses.
 # Any other column is kept too and can be used as a {{blank}} in templates.
@@ -68,7 +72,7 @@ LEAD_FIELDS = ["type", "contact_email", "first_name", "last_name", "company", "c
                "title", "start_date", "school", "previous_company", "tier",
                "open_intern_roles", "priority_tags", "linkedin_url", "email_status",
                "personal_line", "personal_source", "connection", "target_role", "job_link",
-               "subject", "apollo_id", "found_at"]
+               "subject", "source", "apollo_id", "found_at"]
 # What the contact finder searches for (see [search] in config.toml).
 DEFAULT_SEARCH = {
     "titles": ["Data Scientist", "Data Analyst", "Machine Learning Engineer", "AI Engineer",
@@ -79,6 +83,9 @@ DEFAULT_SEARCH = {
     "locations": ["United States"],
     "max_credits_per_run": 25,
     "required_email_status": "verified",
+    # Hand-picks: contacts saved from these Apollo sources on/after this date.
+    "handpicked_sources": ["chrome_extension_linkedin"],
+    "handpicked_since": "2026-10-31",
 }
 
 # Canonical sent-log schema. Existing logs may have only the first columns; that's
@@ -151,6 +158,9 @@ manager_titles = true        # also search managers of these roles
 locations = ["United States"]
 max_credits_per_run = 25     # Apollo credits (1 per email found); the agent asks first
 required_email_status = "verified"   # only add people whose email Apollo verified
+# Your hand-picks: people you save with the Apollo LinkedIn extension on/after this date.
+handpicked_sources = ["chrome_extension_linkedin"]
+handpicked_since = "2026-10-31"
 
 # Share of each day's emails per company tier (percent). Every tier with a share
 # above 0 gets at least 1 a day; slots a tier can't fill go to the best people left.
@@ -163,7 +173,8 @@ required_email_status = "verified"   # only add people whose email Apollo verifi
 # Who gets staged first: a matching `school`, or a tag in `priority_tags`.
 [priority]
 schools = ["Emory"]
-tags = ["chinese"]
+tags = ["chinese", "hand_picked"]   # hand_picked = people you saved yourself in Apollo
+hand_picked_unlisted_tier = 1       # tier for hand-picked people at unlisted companies
 
 # A tag is added automatically when `last_name` is in that file (one name per line).
 [priority.surname_lists]
@@ -337,7 +348,8 @@ def company_tier(row, cfg):
 
     Uses the row's own `tier` if filled in, else looks the company up in the target
     list by name, then by email domain (sub.domain.com also matches domain.com).
-    Companies not on the list get UNKNOWN_TIER, so they sort last.
+    Companies not on the list get UNKNOWN_TIER, so they sort last, except people
+    you hand-picked: they get [priority].hand_picked_unlisted_tier (you chose them).
     """
     own = (row.get("tier") or "").strip()
     if own.isdigit():
@@ -349,7 +361,14 @@ def company_tier(row, cfg):
     for i in range(len(parts) - 1):
         if ".".join(parts[i:]) in targets:
             return targets[".".join(parts[i:])]
+    if is_hand_picked(row):
+        pr = {**DEFAULT_PRIORITY, **(cfg.get("priority") or {})}
+        return int(pr["hand_picked_unlisted_tier"])
     return UNKNOWN_TIER
+
+
+def is_hand_picked(row):
+    return (row.get("source") or "").strip().lower() == HAND_PICKED
 
 
 def tier_caps(cfg, day_total):
@@ -461,8 +480,11 @@ def split_tags(text):
 
 
 def auto_tags(row, cfg):
-    """The row's `priority_tags`, plus any tag whose surname list has its `last_name`."""
+    """The row's `priority_tags`, plus any tag whose surname list has its `last_name`,
+    plus `hand_picked` for people you saved yourself."""
     tags = split_tags(row.get("priority_tags"))
+    if is_hand_picked(row):
+        tags.add(HAND_PICKED)
     last = _letters(row.get("last_name"))
     lists = (cfg.get("priority") or {}).get("surname_lists", {})
     tags |= {tag for tag, path in lists.items() if last and last in load_surnames(path)}

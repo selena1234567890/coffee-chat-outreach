@@ -120,3 +120,43 @@ def test_preview_highlights_personal_line(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert '>> CHECK: "Your talk on ranking was great."' in out
     assert "Dry-run only" in out
+
+
+# --- outreach from-apollo (hand-picked saved contacts) -------------------------
+
+def _contact(name, source, created, **kw):
+    first, last = name.split()
+    c = {"first_name": first, "last_name": last, "email": f"{first.lower()}@corp.com",
+         "email_status": "verified", "title": "Data Scientist", "organization_name": "Truist",
+         "linkedin_url": "", "person_id": "p1", "source": source, "created_at": created}
+    return {**c, **kw}
+
+
+def test_from_apollo_keeps_only_recent_extension_saves(tmp_path):
+    data = {"contacts": [
+        _contact("Yi Jiang", "chrome_extension_linkedin", "2026-10-31T18:00:00Z"),
+        _contact("Old Pick", "chrome_extension_linkedin", "2026-09-01T00:00:00Z"),  # too old
+        _contact("Bulk Search", "search", "2026-11-02T00:00:00Z"),                # not a hand-pick
+    ]}
+    src = tmp_path / "apollo.txt"
+    src.write_text("Some header text before the JSON\n" + json.dumps(data))
+    out = tmp_path / "leads.json"
+    outreach_cli.cmd_from_apollo(argparse.Namespace(file=str(src), out=str(out)),
+                                 _cfg(tmp_path))
+    leads = json.loads(out.read_text())
+    assert [lead["first_name"] for lead in leads] == ["Yi"]
+    assert leads[0]["contact_email"] == "yi@corp.com"
+    assert leads[0]["company"] == "Truist"
+    assert leads[0]["source"] == "hand_picked"
+
+
+def test_from_apollo_output_goes_through_add(tmp_path):
+    data = {"contacts": [_contact("Yi Jiang", "chrome_extension_linkedin",
+                                  "2026-10-31T18:00:00Z")]}
+    src, out = tmp_path / "apollo.json", tmp_path / "leads.json"
+    src.write_text(json.dumps(data))
+    cfg = _cfg(tmp_path)
+    outreach_cli.cmd_from_apollo(argparse.Namespace(file=str(src), out=str(out)), cfg)
+    outreach_cli.cmd_add(argparse.Namespace(file=str(out), dry_run=False), cfg)
+    rows = common.read_rows(cfg["files"]["queue"])[1]
+    assert rows[0]["source"] == "hand_picked"

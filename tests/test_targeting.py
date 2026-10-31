@@ -20,7 +20,7 @@ import send  # noqa: E402
 
 FIELDS = ["type", "contact_email", "first_name", "last_name", "company", "company_size",
           "title", "start_date", "school", "priority_tags", "tier", "open_intern_roles",
-          "subject", "sent_at", "last_reply"]
+          "subject", "source", "sent_at", "last_reply"]
 RECENT = (datetime.date.today() - datetime.timedelta(days=200)).isoformat()
 TARGETS = ("company,domain,tier,notes\n"
            "Google,google.com,1,\nMeta,meta.com,1,\nMeta,fb.com,1,\n"
@@ -235,3 +235,43 @@ def test_tier_share_is_adjustable(tmp_path):
                company_limits={**common.DEFAULT_COMPANY_LIMITS, "large": 50})
     staged, _ = _stage(cfg, _mixed_queue(10, 10, 10))
     assert _tiers(staged) == {"2": 4}
+
+
+# --- hand-picked people (source = hand_picked) ----------------------------------
+
+def test_hand_picked_get_priority_tag(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert "hand_picked" in common.auto_tags({"source": "hand_picked"}, cfg)
+    assert "hand_picked" not in common.auto_tags({"source": "agent"}, cfg)
+
+
+def test_hand_picked_at_unlisted_company_counts_as_tier_1(tmp_path):
+    cfg = _cfg(tmp_path)
+    row = {"company": "Dream Startup", "contact_email": "a@dream.ai"}
+    assert common.company_tier(row, cfg) == common.UNKNOWN_TIER
+    assert common.company_tier({**row, "source": "hand_picked"}, cfg) == 1
+    # a listed company keeps its own tier
+    assert common.company_tier({"company": "Publix", "source": "hand_picked"}, cfg) == 3
+
+
+def test_hand_picked_go_first_within_their_tier(tmp_path):
+    cfg = _cfg(tmp_path, priority={"schools": [], "tags": ["hand_picked"],
+                                   "surname_lists": {}})
+    queue = [_person("agent@google.com", source="agent"),
+             _person("mine@google.com", source="hand_picked")]
+    staged, _ = _stage(cfg, queue, n=1)
+    assert staged[0]["contact_email"] == "mine@google.com"
+    assert "hand_picked" in staged[0]["priority_tags"]
+
+
+def test_status_shows_reply_rates_by_source(tmp_path, capsys):
+    cfg = _cfg(tmp_path)
+    fields = FIELDS
+    common.write_db(cfg["files"]["sent_log"], fields,
+                    [_person("a@google.com", source="hand_picked", last_reply="2026-10-30"),
+                     _person("b@google.com", source="agent")])
+    common.write_db(cfg["files"]["queue"], fields, [])
+    common.write_db(cfg["files"]["database"], fields, [])
+    outreach_cli.cmd_status(argparse.Namespace(), cfg)
+    out = capsys.readouterr().out
+    assert "source: hand_picked" in out and "source: agent" in out
