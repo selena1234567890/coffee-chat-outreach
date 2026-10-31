@@ -34,18 +34,36 @@ cp templates/coffee_chat.txt.example templates/coffee_chat.txt   # then write yo
 cp templates/referral.txt.example templates/referral.txt
 ```
 
-Each CSV row picks its template with the `type` column. Every other column can be used as
-a `{{blank}}` in your template (e.g. `first_name`, `company`, `their_role`, `connection`,
-`target_role`, `job_link`, `subject`). See `mailmerge_database.csv.example`.
+Each CSV row picks its template with the `type` column (leave it blank and `stage` picks it
+for you, see below). Every other column can be used as a `{{blank}}` in your template (e.g.
+`first_name`, `company`, `title`, `connection`, `target_role`, `job_link`, `subject`).
+See `mailmerge_database.csv.example`.
 
 Safety checks added:
 - **Blank check** — if any `{{blank}}` a row's template uses is empty, nothing is sent and
   the problem rows are listed.
 - **Unknown type** — a typo like `coffe_chat` stops the send instead of using the wrong email.
-- **People per company** — `[pacing].max_per_company` (default 3). Extra people stay in the
-  queue for later. You still never email the same person twice.
 - **Test send** — `outreach-send --test` sends the first 2 emails to **your own** address
   (subject starts with `[TEST to …]`). Nothing is logged.
+
+### Staging rules (all adjustable in `config.toml`)
+
+`outreach stage` picks today's batch from the queue using these rules:
+
+| Rule | Setting | Default |
+|---|---|---|
+| Email type, when `type` is blank | `[routing]` | `coffee_chat` if 3+ years at the company (`start_date`) or a lead / manager / director / principal / staff / head `title`; otherwise `referral` |
+| Who goes first | `[priority]` | matching `school` (e.g. Emory) or a tag in `priority_tags` |
+| Automatic tags | `[priority.surname_lists]` | `last_name` found in `data/chinese_surnames.txt` → `chinese` tag |
+| People per company | `[company_limits]` | 3 if under 1,000 employees, 5 if 1,000–9,999, 7 if 10,000+, 4 if `company_size` is blank |
+| Emails per day | `[daily]` | 6 coffee chats + 8 referrals (counts what's staged and sent today) |
+
+People held back by a limit stay in the queue for another day. A `type` you fill in by hand
+always wins. `outreach status` shows reply rates by type and priority group, so you can tune
+the numbers after a week or two.
+
+Extra CSV columns the rules read: `last_name`, `company_size`, `title`, `start_date`
+(`YYYY-MM-DD`, `YYYY-MM` or `YYYY`), `school`, `priority_tags`, `linkedin_url`.
 
 ---
 
@@ -228,7 +246,7 @@ only step 5 sends mail, and it always asks first.
 | `outreach status` | Funnel snapshot: how many are queued, staged, and already sent. |
 | `outreach setup` | Create/verify `config.toml`, resume, password, sender, and area. |
 | `outreach find` | Print a "brief" (your target area + the list of companies to exclude) to hand to a lead-finder. |
-| `outreach stage -n N` | Move **N** leads from the queue into the outgoing batch. Omit `-n` to use `batch_size` from config. Skips anyone already staged or sent. |
+| `outreach stage -n N` | Move up to **N** leads from the queue into the outgoing batch, following the [staging rules](#staging-rules-all-adjustable-in-configtoml). Omit `-n` to use `batch_size` from config. Skips anyone already staged or sent. |
 | `outreach preview` | Render the staged emails (subject + recipient). Sends nothing. |
 | `outreach replies` | Quick offline check of who has replied (reads Gmail over IMAP). |
 | `outreach followup` | List contacts who are past your follow-up window and **haven't replied**. |

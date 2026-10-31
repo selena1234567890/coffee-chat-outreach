@@ -12,6 +12,7 @@ env var), never from a file.
 import contextlib
 import csv
 import datetime
+import functools
 import getpass
 import imaplib
 import os
@@ -44,7 +45,18 @@ DEFAULT_FILES = {
     "queue": "outreach_queue.csv",
     "resume": "resume.pdf",
 }
-DEFAULT_PACING = {"batch_size": 10, "followup_after_days": 6, "max_per_company": 3}
+DEFAULT_PACING = {"batch_size": 14, "followup_after_days": 6}
+# Most people to contact per company, by company size (employee count).
+DEFAULT_COMPANY_LIMITS = {"small": 3, "mid": 5, "large": 7, "unknown": 4,
+                          "small_below": 1000, "large_from": 10000}
+# Which email a person gets when their `type` cell is blank.
+DEFAULT_ROUTING = {"coffee_chat_min_years": 3,
+                   "coffee_chat_titles": ["lead", "manager", "director", "principal",
+                                          "staff", "head"]}
+# Most emails per type per day.
+DEFAULT_DAILY = {"coffee_chat": 6, "referral": 8}
+# Who is staged first. Empty by default; set yours in config.toml.
+DEFAULT_PRIORITY = {"schools": [], "tags": [], "surname_lists": {}}
 
 # Canonical sent-log schema. Existing logs may have only the first columns; that's
 # tolerated on read and extended by `outreach migrate`.
@@ -77,9 +89,39 @@ coffee_chat = "templates/coffee_chat.txt"
 referral = "templates/referral.txt"
 
 [pacing]
-batch_size = 10            # cold emails per day; do not blast
+batch_size = 14            # most emails per day in total; do not blast
 followup_after_days = 6
-max_per_company = 3        # most people to contact at one company
+
+# Most people to contact at one company, by company size (number of employees,
+# from the `company_size` column). Extra people wait in the queue.
+[company_limits]
+small = 3                  # fewer than small_below employees
+mid = 5
+large = 7                  # large_from employees or more (Meta, Amazon...)
+unknown = 4                # company_size is blank
+small_below = 1000
+large_from = 10000
+
+# Which email a person gets when their `type` cell is blank. A type you fill in
+# by hand always wins.
+[routing]
+coffee_chat_min_years = 3  # at the company this long (from `start_date`) -> coffee_chat
+coffee_chat_titles = ["lead", "manager", "director", "principal", "staff", "head"]
+# everyone else -> referral
+
+# Most emails per type per day. Tip: use half for your first week.
+[daily]
+coffee_chat = 6
+referral = 8
+
+# Who gets staged first: a matching `school`, or a tag in `priority_tags`.
+[priority]
+schools = ["Emory"]
+tags = ["chinese"]
+
+# A tag is added automatically when `last_name` is in that file (one name per line).
+[priority.surname_lists]
+chinese = "data/chinese_surnames.txt"
 
 [outreach]
 # The one thing you specify: what kind of internships/roles to target.
@@ -128,11 +170,19 @@ def load_config(path=None):
                  for k, v in {**DEFAULT_FILES, **data.get("files", {})}.items()}
     templates_cfg = {k.strip().lower(): resolve(v, workspace)
                      for k, v in data.get("templates", {}).items()}
+    priority_cfg = {**DEFAULT_PRIORITY, **data.get("priority", {})}
+    priority_cfg["surname_lists"] = {k.strip().lower(): resolve(v, workspace)
+                                     for k, v in priority_cfg["surname_lists"].items()}
     return {
         "email": email_cfg,
         "files": files_cfg,
         "templates": templates_cfg,
         "pacing": {**DEFAULT_PACING, **data.get("pacing", {})},
+        "company_limits": {**DEFAULT_COMPANY_LIMITS, **data.get("company_limits", {})},
+        "routing": {**DEFAULT_ROUTING, **data.get("routing", {})},
+        "daily": {k.strip().lower(): v
+                  for k, v in {**DEFAULT_DAILY, **data.get("daily", {})}.items()},
+        "priority": priority_cfg,
         "outreach": data.get("outreach", {}),
         "workspace": workspace,
         "config_path": path,
@@ -177,6 +227,104 @@ def template_for(row, cfg):
         raise ValueError(f"type {kind or '(blank)'!r} is not one of: "
                          f"{', '.join(sorted(templates))}")
     return templates[kind]
+
+
+def company_size(row):
+    """Employee count from the `company_size` cell ("12,000", "1001-5000", "500+").
+
+    Takes the first number found; None if the cell has no number.
+    """
+    m = re.search(r"\d[\d,]*", row.get("company_size") or "")
+    return int(m.group().replace(",", "")) if m else None
+
+
+def company_limit(row, cfg):
+    """Most people to contact at this row's company, from [company_limits] by size."""
+    lim = {**DEFAULT_COMPANY_LIMITS, **(cfg.get("company_limits") or {})}
+    size = company_size(row)
+    if size is None:
+        return lim["unknown"]
+    if size < lim["small_below"]:
+        return lim["small"]
+    if size >= lim["large_from"]:
+        return lim["large"]
+    return lim["mid"]
+
+
+def years_at_company(row, today=None):
+    """Years since `start_date` (YYYY-MM-DD, YYYY-MM or YYYY), or None if unknown."""
+    m = re.match(r"(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?",
+                 (row.get("start_date") or "").strip())
+    if not m:
+        return None
+    try:
+        start = datetime.date(int(m[1]), int(m[2] or 1), int(m[3] or 1))
+    except ValueError:
+        return None
+    return ((today or datetime.date.today()) - start).days / 365.25
+
+
+def pick_type(row, cfg, today=None):
+    """Email type for a row: its own `type` if filled in, else by [routing].
+
+    coffee_chat for people at the company coffee_chat_min_years or longer, or whose
+    `title` has one of coffee_chat_titles as a whole word; referral for everyone else
+    (including people whose start date is unknown).
+    """
+    own = (row.get("type") or "").strip().lower()
+    if own:
+        return own
+    rules = {**DEFAULT_ROUTING, **(cfg.get("routing") or {})}
+    years = years_at_company(row, today)
+    if years is not None and years >= rules["coffee_chat_min_years"]:
+        return "coffee_chat"
+    title = (row.get("title") or "").lower()
+    if any(re.search(rf"\b{re.escape(w.lower())}\b", title)
+           for w in rules["coffee_chat_titles"]):
+        return "coffee_chat"
+    return "referral"
+
+
+def _letters(name):
+    return re.sub(r"[^a-z]", "", (name or "").lower())
+
+
+@functools.lru_cache(maxsize=None)
+def load_surnames(path):
+    """Last names in a list file (one per line, # comments), lowercased, letters only."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return frozenset(_letters(line.split("#")[0]) for line in f) - {""}
+    except FileNotFoundError:
+        return frozenset()
+
+
+def split_tags(text):
+    """'chinese, alumni' -> {'chinese', 'alumni'} (comma or semicolon separated)."""
+    return {t.strip().lower() for t in re.split(r"[,;]", text or "") if t.strip()}
+
+
+def auto_tags(row, cfg):
+    """The row's `priority_tags`, plus any tag whose surname list has its `last_name`."""
+    tags = split_tags(row.get("priority_tags"))
+    last = _letters(row.get("last_name"))
+    lists = (cfg.get("priority") or {}).get("surname_lists", {})
+    tags |= {tag for tag, path in lists.items() if last and last in load_surnames(path)}
+    return tags
+
+
+def priority_groups(row, cfg):
+    """Which [priority] schools and tags this row matches, e.g. ['Emory', 'chinese']."""
+    pr = cfg.get("priority") or {}
+    school = (row.get("school") or "").lower()
+    tags = split_tags(row.get("priority_tags"))
+    return ([s for s in pr.get("schools", []) if s.lower() in school]
+            + [t for t in pr.get("tags", []) if t.lower() in tags])
+
+
+def priority_score(row, cfg):
+    """How many priority groups a row matches; higher is staged first."""
+    return len(priority_groups(row, cfg))
 
 
 def backup(path, backup_dir=None):

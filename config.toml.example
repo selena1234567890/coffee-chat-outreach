@@ -28,9 +28,39 @@ coffee_chat = "templates/coffee_chat.txt"
 referral = "templates/referral.txt"
 
 [pacing]
-batch_size = 10            # cold emails per day; do not blast
-max_per_company = 3        # most people to contact at one company
+batch_size = 14            # most emails per day in total; do not blast
 followup_after_days = 6    # mark a silent contact follow-up-able after this many days
+
+# Most people to contact at one company, by company size (number of employees,
+# from the `company_size` column). Extra people wait in the queue.
+[company_limits]
+small = 3                  # fewer than small_below employees
+mid = 5
+large = 7                  # large_from employees or more (Meta, Amazon...)
+unknown = 4                # company_size is blank
+small_below = 1000
+large_from = 10000
+
+# Which email a person gets when their `type` cell is blank. A type you fill in
+# by hand always wins.
+[routing]
+coffee_chat_min_years = 3  # at the company this long (from `start_date`) -> coffee_chat
+coffee_chat_titles = ["lead", "manager", "director", "principal", "staff", "head"]
+# everyone else -> referral
+
+# Most emails per type per day. Tip: use half for your first week.
+[daily]
+coffee_chat = 6
+referral = 8
+
+# Who gets staged first: a matching `school`, or a tag in `priority_tags`.
+[priority]
+schools = ["Emory"]
+tags = ["chinese"]
+
+# A tag is added automatically when `last_name` is in that file (one name per line).
+[priority.surname_lists]
+chinese = "data/chinese_surnames.txt"
 
 [outreach]
 # The ONE thing you specify: what kind of internships to target. The agent /

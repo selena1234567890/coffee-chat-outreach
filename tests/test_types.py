@@ -127,7 +127,8 @@ def test_test_flag_sends_only_to_self_and_logs_nothing(monkeypatch, tmp_path):
 def test_stage_caps_people_per_company(tmp_path):
     files = {"queue": str(tmp_path / "q.csv"), "database": str(tmp_path / "db.csv"),
              "sent_log": str(tmp_path / "sent.csv")}
-    cfg = {"files": files, "pacing": {"batch_size": 10, "max_per_company": 2}}
+    cfg = {"files": files, "pacing": {"batch_size": 10},
+           "company_limits": {**common.DEFAULT_COMPANY_LIMITS, "unknown": 2}}
     common.write_db(files["sent_log"], FIELDS, [_row("coffee_chat", "a@x.com")])
     common.write_db(files["database"], FIELDS, [])
     common.write_db(files["queue"], FIELDS,
@@ -137,7 +138,7 @@ def test_stage_caps_people_per_company(tmp_path):
     outreach_cli.cmd_stage(argparse.Namespace(n=None), cfg)
 
     _, staged = common.read_rows(files["database"])
-    # Acme already has 1 sent, cap is 2 -> only b@ joins; Other is unaffected.
+    # Acme (size unknown) already has 1 sent, limit is 2 -> only b@ joins; Other is unaffected.
     assert [r["contact_email"] for r in staged] == ["b@x.com", "d@y.com"]
     _, queue = common.read_rows(files["queue"])
     assert [r["contact_email"] for r in queue] == ["c@x.com"]  # held, not deleted

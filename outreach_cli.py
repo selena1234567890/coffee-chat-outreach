@@ -17,6 +17,7 @@ Commands:
 """
 import argparse
 import collections
+import datetime
 import os
 import subprocess
 import sys
@@ -58,10 +59,33 @@ def cmd_status(args, cfg):
     for kind, n in sorted(kinds.items()):
         print(f"    {kind}: {n}")
     print(f"  Queue (backlog):    {len(q_rows)}")
+    _print_reply_rates(sent_log, cfg)
     if not q_rows:
-        print("\n  Backlog is dry -> run `find` and the internship-scout subagent.")
+        print("\n  Backlog is dry -> run `find` and the contact finder.")
     elif db_rows:
-        print("\n  Batch staged -> `preview`, then `python3 send.py --send` once you approve.")
+        print("\n  Batch staged -> `preview`, then `outreach-send --send` once you approve.")
+
+
+def _print_reply_rates(sent_log, cfg):
+    """Sent vs replied, by email type and by priority group, to tune the rules.
+
+    Replies come from the sent log's last_reply column; refresh it first with
+    `outreach backfill-dates --apply`.
+    """
+    _, rows = _safe_rows(sent_log)
+    if not rows:
+        return
+    sent, replied = collections.Counter(), collections.Counter()
+    for r in rows:
+        groups = [f"type: {(r.get('type') or '').strip() or 'default'}"]
+        groups += [f"priority: {g}" for g in common.priority_groups(r, cfg)] or ["priority: none"]
+        for g in groups:
+            sent[g] += 1
+            replied[g] += bool((r.get("last_reply") or "").strip())
+    print("\n=== Replies so far (refresh: `outreach backfill-dates --apply`) ===")
+    for g in sorted(sent):
+        print(f"  {g:<22} sent {sent[g]:>3}   replied {replied[g]:>3}   "
+              f"({replied[g] / sent[g]:.0%})")
 
 
 def cmd_setup(args, cfg):
@@ -104,7 +128,27 @@ def cmd_find(args, cfg):
     print(f"leads; append them to {os.path.basename(queue)}, then run `stage`.")
 
 
+def _sent_today(r):
+    """True if this sent-log row's sent_at (UTC) falls on today's local date."""
+    try:
+        dt = datetime.datetime.strptime((r.get("sent_at") or "").strip(), "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    local = dt.replace(tzinfo=datetime.timezone.utc).astimezone()
+    return local.date() == datetime.date.today()
+
+
 def cmd_stage(args, cfg):
+    """Move today's batch from the queue into the database, following the rules:
+
+    1. skip anyone already sent or staged (by email)
+    2. fill a blank `type` ([routing]) and add surname tags ([priority.surname_lists])
+    3. priority people first ([priority]), otherwise queue order
+    4. at most company_limit people per company ([company_limits], by size)
+    5. at most [daily] emails per type today (counting staged + sent today)
+    6. at most N in total (-n, default [pacing].batch_size)
+    People skipped by 4-6 stay in the queue for another day.
+    """
     queue, db, sent_log = _paths(cfg)
     n = args.n if args.n is not None else cfg["pacing"]["batch_size"]
     if n <= 0:
@@ -113,60 +157,80 @@ def cmd_stage(args, cfg):
 
     q_fields, q_rows = _safe_rows(queue)
     if not q_rows:
-        print("Queue is empty (header only). Run `find` + internship-scout to refill.")
+        print("Queue is empty (header only). Run `find` + the contact finder to refill.")
         return
     db_fields, db_rows = _safe_rows(db)
-    fields = db_fields or q_fields
+    fields = list(db_fields or q_fields)
+    for extra in ("type", "priority_tags"):
+        if extra not in fields:
+            fields.append(extra)
 
-    # Dedup by normalized email (the identity send.py enforces), and cap how many
-    # people at one company are contacted ([pacing].max_per_company).
-    max_per_company = cfg["pacing"].get("max_per_company", 3)
+    daily = cfg.get("daily") or common.DEFAULT_DAILY
     blk_emails = common.sent_emails(sent_log)
     blk_emails |= {common.normalize_email(r.get("contact_email")) for r in db_rows}
     _, sent_rows = _safe_rows(sent_log)
     per_company = collections.Counter(_company(r) for r in sent_rows + db_rows)
+    used_today = collections.Counter(
+        common.pick_type(r, cfg) for r in db_rows + [r for r in sent_rows if _sent_today(r)])
 
-    def handled(r):
-        return common.normalize_email(r.get("contact_email")) in blk_emails
+    def prepared(r):
+        out = dict(r, type=common.pick_type(r, cfg))
+        out["priority_tags"] = ", ".join(sorted(common.auto_tags(r, cfg)))
+        return out
 
-    def company_full(r):
-        return bool(_company(r)) and per_company[_company(r)] >= max_per_company
-
-    to_move, leftover, dropped, held = [], [], [], []
-    for r in q_rows:
-        if handled(r):
-            dropped.append(r)  # already sent or staged -> remove from queue
-        elif company_full(r):
-            held.append(r)     # company at its cap -> keep in queue, don't stage
+    # Highest priority first; sorted() is stable, so ties keep queue order.
+    ranked = sorted(((r, prepared(r)) for r in q_rows),
+                    key=lambda pair: -common.priority_score(pair[1], cfg))
+    to_move, gone = [], set()
+    dropped = company_full = type_full = 0
+    for orig, r in ranked:
+        email = common.normalize_email(r.get("contact_email"))
+        kind = r["type"]
+        if email in blk_emails:
+            dropped += 1                     # already sent or staged -> remove from queue
+            gone.add(id(orig))
+        elif _company(r) and per_company[_company(r)] >= common.company_limit(r, cfg):
+            company_full += 1                # company at its limit -> stays in queue
+        elif kind in daily and used_today[kind] >= daily[kind]:
+            type_full += 1                   # today's limit for this type -> stays
         elif len(to_move) < n:
             to_move.append(r)
-            blk_emails.add(common.normalize_email(r.get("contact_email")))
+            gone.add(id(orig))
+            blk_emails.add(email)
             per_company[_company(r)] += 1
-        else:
-            leftover.append(r)  # pending beyond this batch -> keep in queue
+            used_today[kind] += 1
+    leftover = [r for r in q_rows if id(r) not in gone]  # original order, unchanged
 
     if not to_move and not dropped:
-        print("Nothing new to stage (queue holds only already-staged/sent rows).")
+        print("Nothing new to stage today.")
+        _print_waiting(company_full, type_full, used_today, daily)
         return
 
     common.backup(queue)
     common.backup(db)
     # DB grows first (additive), queue is rewritten without moved-or-handled rows.
-    # If interrupted between the two writes, the email/company dedup above plus the
+    # If interrupted between the two writes, the email dedup above plus the
     # idempotency check in send.py mean nothing double-sends; backups aid recovery.
     common.write_db(db, fields, db_rows + to_move)
-    common.write_db(queue, q_fields, held + leftover)
+    common.write_db(queue, q_fields, leftover)
 
     print(f"Staged {len(to_move)} -> {os.path.basename(db)}; "
-          f"dropped {len(dropped)} already-handled; {len(held) + len(leftover)} left in queue.")
-    if held:
-        print(f"  ({len(held)} held back: their company already has {max_per_company} "
-              f"contacted; raise [pacing].max_per_company to include them.)")
+          f"dropped {dropped} already-handled; {len(leftover)} left in queue.")
     for r in to_move:
-        kind = (r.get("type") or "").strip()
-        tag = f"  [{kind}]" if kind else ""
-        print(f"  + {r.get('company')} <{r.get('contact_email')}>{tag}")
-    print("\nNext: `outreach_cli.py preview`, then `python3 send.py --send` once you approve.")
+        groups = common.priority_groups(r, cfg)
+        star = f"  * {', '.join(groups)}" if groups else ""
+        print(f"  + [{r['type']}] {r.get('company')} <{r.get('contact_email')}>{star}")
+    _print_waiting(company_full, type_full, used_today, daily)
+    print("\nNext: `outreach preview`, then `outreach-send --test`, then `outreach-send --send`.")
+
+
+def _print_waiting(company_full, type_full, used_today, daily):
+    today = ", ".join(f"{k} {used_today[k]}/{v}" for k, v in sorted(daily.items()))
+    print(f"\nToday so far: {today}")
+    if company_full:
+        print(f"  {company_full} waiting: their company is at its limit ([company_limits]).")
+    if type_full:
+        print(f"  {type_full} waiting: today's limit for their type is used up ([daily]).")
 
 
 def cmd_preview(args, cfg):
@@ -195,7 +259,6 @@ def cmd_migrate(args, cfg):
 
 
 def cmd_followup(args, cfg):
-    import datetime
     _, _, sent_log = _paths(cfg)
     _, rows = _safe_rows(sent_log)
     days = cfg["pacing"]["followup_after_days"]
