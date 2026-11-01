@@ -876,6 +876,10 @@ def check_lead(r, cfg, known_emails):
             return f"public email last seen {seen:.1f} years ago (too old, may bounce)"
     if common.skip_reason(r, cfg):
         return common.skip_reason(r, cfg)
+    company_domain = common.main_domain(r.get("company_domain"))
+    email_dom = common.main_domain(common.email_domain(r.get("contact_email")))
+    if company_domain and status != common.PUBLIC and email_dom != company_domain:
+        return f"email is at {email_dom}, not their current company ({company_domain})"
     if common.too_small(r, cfg):
         return "company under min_employees"
     return None

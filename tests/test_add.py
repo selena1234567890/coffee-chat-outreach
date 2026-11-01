@@ -200,3 +200,13 @@ def test_check_line_shows_where_public_email_came_from(tmp_path, capsys):
     _add(tmp_path, _cfg(tmp_path), [_web_lead("w@google.com")])
     assert ">> CHECK email: published at https://arxiv.org/abs/2601.00001" in \
         capsys.readouterr().out
+
+
+def test_email_at_a_different_company_is_rejected(tmp_path, capsys):
+    rows = _add(tmp_path, _cfg(tmp_path), [
+        _lead("old@meta.com", company="Snap Inc.", company_domain="snap.com"),     # stale email
+        _lead("ok@mail.google.com", company="Google", company_domain="google.com"),  # subdomain ok
+        _lead("p@walmart.com", company="Walmart", company_domain="careers.walmart.com"),
+    ])
+    assert [r["contact_email"] for r in rows] == ["ok@mail.google.com", "p@walmart.com"]
+    assert "email is at meta.com, not their current company (snap.com)" in capsys.readouterr().out

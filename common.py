@@ -85,7 +85,7 @@ PUBLIC = "public"             # email_status for an email the person published t
 # Columns a lead (one person to contact) can have, in the order a new queue file uses.
 # Any other column is kept too and can be used as a {{blank}} in templates.
 LEAD_FIELDS = ["type", "contact_email", "first_name", "last_name", "company", "company_size",
-               "title", "start_date", "school", "previous_company", "tier",
+               "company_domain", "title", "start_date", "school", "previous_company", "tier",
                "open_intern_roles", "priority_tags", "linkedin_url", "email_status",
                "email_source", "email_seen", "personal_line", "personal_source",
                "connection", "target_role", "job_link",
@@ -399,6 +399,12 @@ def _norm(text):
 def email_domain(addr):
     """'Jane@Mail.Meta.com' -> 'mail.meta.com' ('' if no @)."""
     return normalize_email(addr).rpartition("@")[2]
+
+
+def main_domain(domain):
+    """'careers.walmart.com' / 'https://www.Walmart.com/' -> 'walmart.com' (last two parts)."""
+    d = re.sub(r"^[a-z]+://", "", (domain or "").strip().lower()).split("/")[0]
+    return ".".join(d.split(".")[-2:]) if "." in d else d
 
 
 def _csv_rows(path):
