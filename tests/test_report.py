@@ -36,7 +36,7 @@ def _cfg(tmp_path, rows):
 
 
 def _report(cfg, capsys):
-    outreach_cli.cmd_report(argparse.Namespace(), cfg)
+    outreach_cli.cmd_report(argparse.Namespace(no_imap=True), cfg)
     return capsys.readouterr().out
 
 
@@ -134,3 +134,12 @@ def test_report_headline_metrics(tmp_path, capsys):
     assert "RESPONSE RATE:          3 replied / 4 emailed = 75%" in out
     assert "REFERRAL SUCCESS RATE:  2 referrals / 4 emailed = 50%" in out
     assert "of the 3 referral asks: 1 = 33%" in out
+
+
+def test_report_checks_gmail_for_replies_first(tmp_path, capsys, monkeypatch):
+    cfg = _cfg(tmp_path, [_sent("a@g.com")])
+    calls = []
+    monkeypatch.setattr(outreach_cli, "cmd_backfill_dates", lambda a, c: calls.append(a.apply))
+    outreach_cli.cmd_report(argparse.Namespace(no_imap=False), cfg)
+    assert calls == [True]                                 # replies synced before counting
+    assert "Checking Gmail for new replies" in capsys.readouterr().out

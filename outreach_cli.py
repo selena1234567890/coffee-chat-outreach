@@ -552,8 +552,13 @@ def _print_group_table(results, dimension):
 def cmd_report(args, cfg):
     """The numbers to tune the tool by: reply, bounce and good-result rates, split by
     type, template version, tier, priority, source, personal line and open roles;
-    first email vs follow-up; time to reply; Apollo credits per reply; health."""
+    first email vs follow-up; time to reply; Apollo credits per reply; health.
+    Checks Gmail for new replies first, so the numbers are never stale."""
     _, _, sent_log = _paths(cfg)
+    if not args.no_imap and _safe_rows(sent_log)[1]:
+        print("Checking Gmail for new replies...")
+        cmd_backfill_dates(argparse.Namespace(apply=True), cfg)
+        print()
     _, sent_rows = _safe_rows(sent_log)
     results = person_results(sent_rows, cfg)
     if not results:
@@ -959,7 +964,7 @@ def main():
             p.add_argument("file", help="JSON file: a list of leads (objects)")
             p.add_argument("--dry-run", action="store_true",
                            help="show what would be added, change nothing")
-        if name == "daily":
+        if name in ("daily", "report"):
             p.add_argument("--no-imap", action="store_true",
                            help="don't check Gmail (replies/bounces); for offline runs")
         if name == "mark":
