@@ -138,6 +138,9 @@ For each approved person:
    - If you find nothing solid, use exactly this plain line, filled in:
      "I came across your profile and was genuinely impressed by your work as a
      <title> at <company>." and leave `personal_source` empty.
+   - For an Emory alum with no other solid fact, use exactly:
+     "I noticed you have also studied in Emory and was genuinely impressed by your
+     work as a <title> at <company>."
    - Never mention anything private (family, location, age, background, looks).
 4. Set `source` to `"agent"`. Do not set `type` (the tool decides it). Do not set `priority_tags` (the tool adds
    tags from the surname list); you may add `chinese` only if the profile itself shows
