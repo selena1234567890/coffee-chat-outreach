@@ -6,6 +6,7 @@ Hermetic: a temp workspace with a real config.toml, offline (--no-imap).
 import argparse
 
 import common
+import guard
 import outreach_cli
 
 QUEUE_FIELDS = ["contact_email", "first_name", "last_name", "company", "company_size",
@@ -21,12 +22,14 @@ def _workspace(tmp_path, n_people=3):
         '[email]\naddress = "me@gmail.com"\n'
         '[templates]\ncoffee_chat = "templates/coffee_chat.txt"\n'
         'referral = "templates/referral.txt"\nfollowup = "templates/followup.txt"\n')
-    people = [{"contact_email": f"p{i}@google.com", "first_name": f"Pat{i}", "last_name": "Lee",
+    people = [{"contact_email": f"pat.lee{i}@google.com", "first_name": "Pat", "last_name": "Lee",
                "company": "Google", "company_size": "180000", "title": "Data Scientist",
                "start_date": "2026-01", "subject": "Hello", "email_status": "verified"}
               for i in range(n_people)]
     common.write_db(str(tmp_path / "outreach_queue.csv"), QUEUE_FIELDS, people)
-    return common.load_config(str(tmp_path / "config.toml"))
+    cfg = common.load_config(str(tmp_path / "config.toml"))
+    guard.approve_templates(cfg)  # the preview runs send.py with the real safety checks
+    return cfg
 
 
 def test_daily_stages_and_previews_without_sending(tmp_path, capfd):

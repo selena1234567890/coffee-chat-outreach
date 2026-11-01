@@ -52,3 +52,7 @@ data/emory_alumni*
 
 # Companies where you already have a referral (private)
 data/covered_companies.csv
+
+# Emails held by the safety checks (real people) and your approved-template fingerprints
+data/held.csv
+data/approved_templates.json

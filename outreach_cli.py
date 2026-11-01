@@ -27,6 +27,7 @@ import subprocess
 import sys
 
 import common
+import guard
 
 PY = sys.executable
 
@@ -940,6 +941,85 @@ def cmd_from_deepline(args, cfg):
         print(f"  - skipped {name}: {why}")
 
 
+def cmd_approve_templates(args, cfg):
+    """Record your templates, as they are now, as approved. If a template changes
+    later (by you or anyone), emails using it are stopped until you run this again."""
+    for name in guard.approve_templates(cfg):
+        print(f"  approved {name}")
+    print(f"Saved to {guard.approved_path(cfg)}.")
+
+
+def cmd_held(args, cfg):
+    """List the emails the safety checks held for your review, with the reasons."""
+    _, rows = _safe_rows(cfg["files"]["held"])
+    if not rows:
+        print("Nothing held.")
+        return
+    print(f"=== {len(rows)} held email(s) ===")
+    for r in rows:
+        print(f"  {r.get('first_name')} {r.get('last_name')} <{r.get('contact_email')}> "
+              f"({r.get('company')}), held {(r.get('held_at') or '')[:10]}")
+        for reason in (r.get("held_reason") or "").split("; "):
+            print(f"    - {reason}")
+        common.print_check_line(r, indent="    ")
+    print("\nApprove with `outreach approve <email> ...` (or --all); "
+          "drop with `outreach approve --drop <email>`.")
+
+
+def cmd_approve(args, cfg):
+    """Move held emails back into the queue, marked approved=yes (you read them), so
+    they go out with the next batch. With --drop, remove them instead."""
+    held_path = cfg["files"]["held"]
+    fields, rows = _safe_rows(held_path)
+    want = {common.normalize_email(e) for e in args.emails}
+    if not args.all and not want:
+        raise SystemExit("ERROR: give one or more emails, or --all.")
+    pick = [r for r in rows if args.all or common.normalize_email(r.get("contact_email")) in want]
+    unknown = want - {common.normalize_email(r.get("contact_email")) for r in pick}
+    if unknown:
+        raise SystemExit(f"ERROR: not in the held list: {', '.join(sorted(unknown))}")
+    keep = [r for r in rows if r not in pick]
+    common.backup(held_path)
+    if not args.drop:
+        queue = cfg["files"]["queue"]
+        q_fields, q_rows = _safe_rows(queue)
+        q_fields = list(q_fields or common.LEAD_FIELDS)
+        q_fields += [f for f in ("approved",) if f not in q_fields]
+        back = [{k: v for k, v in {**r, "approved": "yes"}.items() if k in q_fields}
+                for r in pick]
+        if os.path.exists(queue):
+            common.backup(queue)
+        common.write_db(queue, q_fields, back + q_rows)  # first in line
+    common.write_db(held_path, fields, keep)
+    verb = "Dropped" if args.drop else "Approved (back at the front of the queue)"
+    print(f"{verb}: {len(pick)}. Still held: {len(keep)}.")
+
+
+def cmd_spot_check(args, cfg):
+    """Show a few random emails from the latest send day in full, exactly as sent
+    (rebuilt from your approved template + that person's blanks)."""
+    import random
+    _, rows = _safe_rows(_paths(cfg)[2])
+    rows = [r for r in rows if (r.get("sent_at") or "").strip()]
+    if not rows:
+        print("Nothing sent yet.")
+        return
+    day = max(r["sent_at"][:10] for r in rows)
+    pool = [r for r in rows if r["sent_at"][:10] == day]
+    by_name = {os.path.basename(p): p for p in common.template_paths(cfg)}
+    print(f"=== Spot check: {min(args.n, len(pool))} of {len(pool)} sent on {day} ===")
+    for r in random.sample(pool, min(args.n, len(pool))):
+        path = by_name.get(r.get("template_version") or "")
+        if not path:
+            print(f"\n(can't rebuild {r.get('contact_email')}: template unknown)")
+            continue
+        headers, body = common.load_template(path)
+        r = common.with_blanks(r, cfg)
+        print(f"\nTO:      {r.get('contact_email')}\n"
+              f"SUBJECT: {r.get('subject_sent') or common.render(headers['SUBJECT'], r)}\n")
+        print(common.render(body, r).strip())
+
+
 ADD_REQUIRED = ("contact_email", "first_name", "company")
 
 
@@ -1033,6 +1113,8 @@ COMMANDS = {
     "from-apollo": cmd_from_apollo, "from-deepline": cmd_from_deepline,
     "health": cmd_health, "mark": cmd_mark,
     "report": cmd_report, "daily": cmd_daily,
+    "approve-templates": cmd_approve_templates, "held": cmd_held, "approve": cmd_approve,
+    "spot-check": cmd_spot_check,
 }
 
 
@@ -1068,6 +1150,13 @@ def main():
             p.add_argument("people", help="Deepline people search results (CSV)")
             p.add_argument("emails", help="Deepline email waterfall results (CSV)")
             p.add_argument("-o", "--out", required=True, help="leads JSON file to write")
+        if name == "approve":
+            p.add_argument("emails", nargs="*", help="email address(es) to approve")
+            p.add_argument("--all", action="store_true", help="every held email")
+            p.add_argument("--drop", action="store_true",
+                           help="remove them from the held list instead (never send)")
+        if name == "spot-check":
+            p.add_argument("-n", type=int, default=2, help="how many (default 2)")
         if name == "backfill-dates":
             p.add_argument("--apply", action="store_true",
                            help="write the dates (default: dry-run preview)")

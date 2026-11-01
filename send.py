@@ -38,6 +38,7 @@ from email.message import EmailMessage
 from email.utils import make_msgid
 
 import common
+import guard
 
 TEST_COUNT = 2  # how many emails --test sends to yourself
 
@@ -189,6 +190,27 @@ def main():
             print(f"  - {p}")
         sys.exit(1)
 
+    # Safety checks (guard.py): anything that isn't clearly what you approved is held
+    # for you instead of sent; too many broken emails stops the whole batch.
+    checks = [guard.check(r, h, b, common.template_for(r, cfg), cfg) for r, h, b in plan]
+    held = [(r, c) for (r, _, _), c in zip(plan, checks) if c]
+    plan = [p for p, c in zip(plan, checks) if not c]
+    stop = guard.too_many_problems(checks, cfg)
+    if held:
+        print(f"=== HELD for your review: {len(held)} email(s), not sent ===")
+        for r, c in held:
+            print(f"  {r.get('first_name')} {r.get('last_name')} <{r.get('contact_email')}> "
+                  f"({r.get('company')})")
+            for kind, reason in c:
+                print(f"    - [{kind}] {reason}")
+            common.print_check_line(r, indent="    ")
+        print()
+    if stop:
+        print(f"SAFETY STOP: more than {guard.settings(cfg)['max_problem_percent']}% of "
+              f"this batch has a problem, so nothing will be sent. Fix the problems above.")
+        if args.send or args.test or args.spam_check:
+            sys.exit(2)
+
     print(f"=== {len(plan)} email(s) staged ===\n")
     for r, headers, _ in plan:
         kind = (r.get("type") or "").strip() or "default"
@@ -214,8 +236,11 @@ def main():
         print("Dry-run only. Re-run with --test to email yourself, or --send to deliver.")
         return
 
+    if not plan:
+        print("Nothing passed the safety checks, so nothing to send.")
+        return
     if not args.yes:
-        ok = input(f"Send {len(rows)} email(s)? [y/N] ").strip().lower()
+        ok = input(f"Send {len(plan)} email(s)? [y/N] ").strip().lower()
         if ok != "y":
             print("Aborted. Nothing sent.")
             return
@@ -235,6 +260,12 @@ def main():
     # Preflight: ensure the sent log has the current schema (adds sent_at to old
     # logs) BEFORE any message goes out, never after a send.
     common.migrate_sent_log(LOG)
+    if held:  # move held emails out of the batch, into the held list for your OK
+        common.hold_rows(cfg, [{**r, "held_reason": "; ".join(x for _, x in c)}
+                               for r, c in held])
+        rows = [r for r, _, _ in plan]
+        common.write_db(DB, fieldnames, rows, ignore_extra=True)
+        print(f"Moved {len(held)} held email(s) to {os.path.basename(cfg['files']['held'])}.")
 
     # Transactional send: archive each success IMMEDIATELY and rewrite the DB to
     # only the not-yet-sent rows, so a crash mid-batch can never (a) lose a row we

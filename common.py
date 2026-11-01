@@ -50,6 +50,7 @@ DEFAULT_FILES = {
     "do_not_contact": "data/do_not_contact.csv",
     "covered_companies": "data/covered_companies.csv",
     "send_state": "data/send_state.json",
+    "held": "data/held.csv",
 }
 DEFAULT_PACING = {"batch_size": 14, "followup_after_days": 6}
 # Most people to contact per company, by company size (employee count).
@@ -89,7 +90,7 @@ LEAD_FIELDS = ["type", "contact_email", "first_name", "last_name", "company", "c
                "open_intern_roles", "priority_tags", "linkedin_url", "email_status",
                "email_source", "email_seen", "personal_line", "personal_source",
                "connection", "target_role", "job_link",
-               "subject", "source", "apollo_id", "found_at"]
+               "subject", "source", "apollo_id", "found_at", "approved"]
 # What the contact finder searches for (see [search] in config.toml).
 DEFAULT_SEARCH = {
     "titles": ["Data Scientist", "Data Analyst", "Machine Learning Engineer", "AI Engineer",
@@ -1007,6 +1008,23 @@ def archive(log_path, fieldnames, sent_rows):
         w.writerows(existing_rows)
         w.writerows(sent_rows)
     _atomic_write(log_path, _w)
+
+
+HELD_FIELDS = ["held_at", "held_reason"]
+
+
+def hold_rows(cfg, rows):
+    """Append emails the safety checks held to [files].held, for your review."""
+    path = cfg["files"]["held"]
+    fields, old = read_rows(path) if os.path.exists(path) else ([], [])
+    stamp = utcnow_iso()
+    rows = [{**r, "held_at": stamp} for r in rows]
+    fields = list(dict.fromkeys(list(fields) + HELD_FIELDS + LEAD_FIELDS
+                                + [k for r in rows for k in r]))
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if os.path.exists(path):
+        backup(path)
+    write_db(path, fields, old + rows, ignore_extra=True)
 
 
 def utcnow_iso():

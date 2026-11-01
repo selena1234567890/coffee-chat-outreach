@@ -90,7 +90,27 @@ nobody who replied gets a follow-up.
 - `outreach mark <email> <outcome>`: record what happened. Outcomes: `coffee_chat_booked`,
   `referral_given`, `interview`, `offer` (these count as good results), `not_interested`,
   `no_reply`.
-- Replies come from `outreach backfill-dates --apply`; run it before the report.
+- The report checks Gmail for new replies first (`--no-imap` to skip), so the numbers are current.
+
+### Safety checks before every send (`guard.py`)
+
+So emails can go out without you reading each one, `outreach-send` checks every email first.
+Your templates are fixed text, so the checks look at the blanks and the templates:
+
+| Check | If it fails |
+|---|---|
+| The template is word for word the one you approved (`outreach approve-templates`) | problem |
+| No leftover `{{blank}}` or `<...>`, no links except your resume link, no words like TODO | problem |
+| The personal line is one of your approved sentences (`[guard].line_patterns`), with the person's real company and correct a/an | held for review |
+| The greeting name looks like a first name and matches the email address; not a shared inbox | held for review |
+| The email is at the person's current company | held for review |
+
+Held emails go to `data/held.csv` instead of being sent; the rest go out. `outreach held`
+lists them, `outreach approve <email>` (or `--all`) puts them back at the front of the queue
+(marked approved, so the per-person checks are skipped), `outreach approve --drop <email>`
+removes them. If more than `[guard].max_problem_percent` (20%) of a batch has a problem,
+**nothing** is sent (SAFETY STOP). `outreach spot-check` shows 2 random emails from the last
+send day in full.
 
 ### The daily routine (Agent 2: `.claude/agents/sender.md`)
 
@@ -108,6 +128,7 @@ then it stops and shows you the batch) and, only after you approve the number, *
 
 | Round | Where people come from | Cost |
 |---|---|---|
+| D | Deepline: people who studied at Emory and now hold a data/ML/AI job at a target company, plus a verified work email (`outreach from-deepline`); skips anyone whose headline says they moved | Deepline credits (~0.6 per person) |
 | 0 | People you save with the Apollo LinkedIn extension (`outreach from-apollo` picks them out) | 1 Apollo credit each, when you save |
 | W | The agent's web search: people + an email they **published themselves** (papers, personal sites, GitHub) | free |
 | 1–2 | Apollo people search + email reveal (needs a paid Apollo plan) | 1 credit per email |

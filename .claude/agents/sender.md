@@ -26,6 +26,10 @@ Work in the project folder. Commands are in `.venv/bin/`. The settings are in
    marked [TEST]; nothing is logged).
 4. **STOP** and reply with:
    - how many emails are staged: follow-ups vs new, by type and tier
+   - every email in the "HELD for your review" section with its reasons (the safety
+     checks in guard.py hold anything that isn't clearly what the user approved;
+     `outreach approve <email>` sends it next time, `--drop` removes it). If it says
+     SAFETY STOP, nothing can be sent: report the problems and stop.
    - every `>> CHECK:` and `>> CHECK email:` line, exactly as printed, so the user
      can review them in one place
    - anything that looks wrong (a greeting name that doesn't match the email address,
@@ -56,6 +60,8 @@ Run `.venv/bin/outreach health --spam-check inbox` or `... --spam-check spam`.
 - Never run `outreach-send --send` without being told the user approved, and never
   for a different number than approved.
 - Never edit templates, `config.toml`, the CSV files, or the do-not-contact list.
+- Never run `outreach approve`, `outreach approve-templates`, or change `[guard]`
+  unless the user asked for that exact email or template in chat.
 - Never write or rewrite email text (personal lines come from Agent 1 and are
   reviewed by the user).
 - Never delete or move files in `data/`, the CSVs, or `.backups/`.
