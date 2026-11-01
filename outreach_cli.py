@@ -267,7 +267,8 @@ def cmd_stage(args, cfg):
 
     def rank(pair):
         r = pair[1]
-        return (int(r["tier"]), not common.has_open_roles(r), -common.priority_score(r, cfg))
+        return (not common.relevant_role(r, cfg), int(r["tier"]), not common.has_open_roles(r),
+                -common.priority_score(r, cfg))
 
     # Best first; sorted() is stable, so ties keep queue order.
     ranked = sorted(((r, prepared(r)) for r in q_rows), key=rank)
@@ -301,6 +302,8 @@ def cmd_stage(args, cfg):
                 why[id(orig)] = "type"       # today's limit for this type -> stays
             elif len(to_move) >= n:
                 why[id(orig)] = "full"       # today's batch is full -> stays
+            elif by_share and not common.relevant_role(r, cfg):
+                why[id(orig)] = "role"       # not a data/ML/AI job: only leftover slots
             elif by_share and used_tier[tier] >= tier_cap.get(tier, 0):
                 why[id(orig)] = "tier"       # tier's share used; may still get a pass-2 slot
             else:
@@ -355,6 +358,7 @@ WAITING_REASONS = {
     "company": "their company is at its limit ([company_limits])",
     "type": "today's limit for their type is used up ([daily])",
     "full": "today's batch is full (-n / [pacing].batch_size)",
+    "role": "not a data/ML/AI job, so only used when nobody better is left",
 }
 
 
@@ -509,6 +513,7 @@ def person_results(sent_rows, cfg):
         tier = common.company_tier(first, cfg)
         out.append({
             "row": first,
+            "replied_at": replied_at,
             "bounced": bounced,
             "replied": bool(replied_at) and not bounced,
             "replied_after_followup": bool(replied_at and fu_sent and replied_at > fu_sent),
@@ -1020,6 +1025,133 @@ def cmd_spot_check(args, cfg):
         print(common.render(body, r).strip())
 
 
+DEEPLINE_CREDITS_PER_PERSON = 0.8   # measured on 2026-11-01: ~8.4 credits for 11 usable leads
+
+
+def deepline_credits():
+    """{'balance', 'used_30', 'cap'} from `deepline billing usage`, or None if unknown."""
+    try:
+        out = subprocess.run(["deepline", "billing", "usage"], capture_output=True,
+                             text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = {}
+    for key, label in (("balance", "Balance"), ("used_30", "Last 30 days usage"),
+                       ("cap", "Monthly usage cap")):
+        m = re.search(rf"{label}:\s*([\d.]+)", out)
+        if m:
+            found[key] = float(m.group(1))
+    return found if "balance" in found else None
+
+
+def credit_warnings(credits, per_day, cost=DEEPLINE_CREDITS_PER_PERSON):
+    """When to tell you to add Deepline credits. The finder keeps 2 days of people
+    queued, so warn at 5 days left (time to top up) and again at 2 (urgent)."""
+    if not credits:
+        return ["Couldn't check Deepline credits (run `deepline billing usage`)."]
+    need = max(per_day, 1) * cost            # credits per day at today's ramp step
+    days = credits["balance"] / need
+    out = []
+    if days < 2:
+        out.append(f"TOP UP DEEPLINE NOW: {credits['balance']:.1f} credits left, about "
+                   f"{days:.1f} day(s) of new people at {per_day}/day.")
+    elif days < 5:
+        out.append(f"Top up Deepline soon: {credits['balance']:.1f} credits left, about "
+                   f"{days:.0f} days of new people at {per_day}/day.")
+    cap = credits.get("cap")
+    if cap and credits.get("used_30", 0) + 2 * need > cap:
+        out.append(f"Deepline monthly cap almost reached ({credits.get('used_30', 0):.1f} of "
+                   f"{cap:.0f} used in 30 days): raise it with `deepline billing set-limit`.")
+    return out
+
+
+def build_feedback(cfg, today=None, credits=None, now=None):
+    """The daily feedback: (subject, text). Short; says "all good" when nothing needs you."""
+    today = today or datetime.date.today()
+    day = today.isoformat()
+    queue, _, sent_log = _paths(cfg)
+    _, sent_rows = _safe_rows(sent_log)
+    results = person_results(sent_rows, cfg)
+    n = len(results)
+    replied = [p for p in results if p["replied"]]
+    referrals = sum(p["outcome"] == "referral_given" for p in results)
+    since = (now or datetime.datetime.now(datetime.timezone.utc)) - datetime.timedelta(days=1)
+    new_replies = [p["row"] for p in replied
+                   if p["replied_at"] >= since.strftime("%Y-%m-%dT%H:%M:%SZ")]
+    bounced_today = [r for r in sent_rows if (r.get("bounced_at") or "")[:10] == day]
+    run = (common.load_state(cfg).get("last_send") or {})
+    run = run if run.get("date") == day else {}
+    ramp = common.ramp_status(cfg, first_send=common.first_send_date(sent_rows), today=today)
+    per_day = ramp["per_day"] or common.DEFAULT_RAMP["steps"][ramp["step"]][0]
+    held = _safe_rows(cfg["files"]["held"])[1]
+    queued = len(_safe_rows(queue)[1])
+
+    needs, good = [], []
+    if not run:
+        needs.append("Nothing was sent today (the 10 am run didn't send).")
+    elif run.get("stopped"):
+        needs.append("SAFETY STOP: nothing was sent. Problems: "
+                     + "; ".join(run.get("problems") or ["see the 10 am chat"]))
+    else:
+        good.append(f"Sent {run.get('sent', 0)} email(s).")
+        if run.get("failed"):
+            needs.append(f"{len(run['failed'])} failed to send: " + ", ".join(run["failed"]))
+    if ramp["paused_until"]:
+        needs.append(f"Sending is paused until {ramp['paused_until']} (a warning sign).")
+    if bounced_today:
+        needs.append(f"{len(bounced_today)} bounced: "
+                     + ", ".join(r.get("contact_email", "") for r in bounced_today))
+    if held:
+        needs.append(f"{len(held)} email(s) held for your OK (see the 10 am chat, or "
+                     f"`outreach held`).")
+    if queued < per_day:
+        needs.append(f"Queue is low: {queued} people left, {per_day} needed per day.")
+    needs += credit_warnings(credits, per_day)
+
+    lines = [f"Outreach daily report, {today:%a %b %-d}", ""]
+    lines.append("Everything's good." if not needs else "Needs you:")
+    lines += [f"  - {x}" for x in needs]
+    lines += ["", "Today:"] + [f"  - {x}" for x in good]
+    if new_replies:
+        lines.append("  - New replies (last 24 hours): " + ", ".join(
+            f"{r.get('first_name')} {r.get('last_name')} ({r.get('company')})"
+            for r in new_replies))
+    else:
+        lines.append("  - No new replies in the last 24 hours.")
+    lines += ["", f"RESPONSE RATE:          {len(replied)} replied / {n} emailed = "
+                  f"{_rate(len(replied), n).strip()}",
+              f"REFERRAL SUCCESS RATE:  {referrals} referrals / {n} emailed = "
+              f"{_rate(referrals, n).strip()}",
+              f"People who replied so far: {len(replied)}",
+              "", f"Ramp: {per_day}/day (step {ramp['step'] + 1}).  Queue: {queued} people.",
+              "", "Got a referral or a coffee chat? Tell Claude, and it will be recorded."]
+    subject = (f"Outreach {today:%b %-d}: all good" if not needs
+               else f"Outreach {today:%b %-d}: {len(needs)} thing(s) need you")
+    return subject, "\n".join(lines) + "\n"
+
+
+def cmd_feedback(args, cfg):
+    """Today's short feedback (what went well, rates, replies, what failed). With
+    --email, also sends it to your own Gmail address (nobody else)."""
+    if not args.no_imap and _safe_rows(_paths(cfg)[2])[1]:
+        cmd_backfill_dates(argparse.Namespace(apply=True), cfg)
+        print()
+    subject, text = build_feedback(cfg, credits=deepline_credits())
+    print(f"SUBJECT: {subject}\n\n{text}")
+    if not args.email:
+        return
+    from email.message import EmailMessage
+    em = cfg["email"]
+    msg = EmailMessage()
+    msg["From"] = msg["To"] = em["address"]
+    msg["Subject"] = subject
+    msg.set_content(text)
+    with common.smtp_session(em["smtp_host"], int(em["smtp_port"]), em["address"],
+                             common.get_password(em["keychain_service"])) as smtp:
+        smtp.send_message(msg)
+    print(f"Sent to {em['address']}.")
+
+
 ADD_REQUIRED = ("contact_email", "first_name", "company")
 
 
@@ -1114,7 +1246,7 @@ COMMANDS = {
     "health": cmd_health, "mark": cmd_mark,
     "report": cmd_report, "daily": cmd_daily,
     "approve-templates": cmd_approve_templates, "held": cmd_held, "approve": cmd_approve,
-    "spot-check": cmd_spot_check,
+    "spot-check": cmd_spot_check, "feedback": cmd_feedback,
 }
 
 
@@ -1132,7 +1264,10 @@ def main():
             p.add_argument("file", help="JSON file: a list of leads (objects)")
             p.add_argument("--dry-run", action="store_true",
                            help="show what would be added, change nothing")
-        if name in ("daily", "report"):
+        if name == "feedback":
+            p.add_argument("--email", action="store_true",
+                           help="also send it to your own Gmail address")
+        if name in ("daily", "report", "feedback"):
             p.add_argument("--no-imap", action="store_true",
                            help="don't check Gmail (replies/bounces); for offline runs")
         if name == "mark":

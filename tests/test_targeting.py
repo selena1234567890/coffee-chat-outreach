@@ -320,3 +320,26 @@ def test_no_followups_to_covered_companies(tmp_path):
     sent = {**_person("a@capitalone.com", company="Capital One"), "type": "referral",
             "sent_at": "2026-10-01T12:00:00Z", "message_id": "<a@x>"}
     assert outreach_cli.due_followups([sent], [], cfg) == []
+
+
+# --- data/ML/AI roles first ------------------------------------------------------
+
+def test_relevant_role():
+    cfg = {"priority": {}}
+    for title in ("Senior Data Science Analyst", "ML Engineer", "Applied AI Lead",
+                  "Business Intelligence Product Manager", "Quantitative Researcher", ""):
+        assert common.relevant_role({"title": title}, cfg), title
+    for title in ("Integration Engineer", "Investment Analyst", "Equity Research Associate",
+                  "Management Consultant", "Domain Expert"):     # "ai" in "domain" isn't a word
+        assert not common.relevant_role({"title": title}, cfg), title
+    assert common.relevant_role({"title": "Consultant", "source": common.HAND_PICKED}, cfg)
+
+
+def test_other_roles_go_last_even_from_a_better_tier(tmp_path):
+    queue = [_person("consult@google.com", title="Management Consultant", school="Emory"),
+             _person("ds@publix.com", title="Data Scientist")]
+    staged, left = _stage(_cfg(tmp_path), queue, n=1)
+    assert [r["contact_email"] for r in staged] == ["ds@publix.com"]
+    assert [r["contact_email"] for r in left] == ["consult@google.com"]   # kept as a backup
+    staged, _ = _stage(_cfg(tmp_path), queue, n=2)                         # room for both
+    assert [r["contact_email"] for r in staged] == ["ds@publix.com", "consult@google.com"]

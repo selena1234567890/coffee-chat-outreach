@@ -76,7 +76,16 @@ DEFAULT_SENDING = {"min_gap_seconds": 60, "max_gap_seconds": 180, "spam_check_ad
 DEFAULT_TIER_SHARE = {1: 60, 2: 30, 3: 10}
 # Who is staged first. Empty by default; set yours in config.toml.
 DEFAULT_PRIORITY = {"schools": [], "tags": [], "surname_lists": {},
-                    "hand_picked_unlisted_tier": 1}
+                    "hand_picked_unlisted_tier": 1,
+                    # A referral counts most from someone in the same field, so people
+                    # whose title has none of these words go last (backup only).
+                    # "analyst"/"research" alone would also match finance jobs.
+                    "role_keywords": ["data", "machine learning", "ml", "ai", "analytics",
+                                      "product analyst", "scientist", "science",
+                                      "research engineer", "quantitative", "quant",
+                                      "intelligence", "statistics", "statistician",
+                                      "decision", "mlops", "deep learning", "nlp",
+                                      "computer vision"]}
 # `source` values: who found the person (compare reply rates by source in `status`).
 HAND_PICKED = "hand_picked"   # you saved them yourself (Apollo extension)
 AGENT_FOUND = "agent"         # the contact finder's Apollo search found them
@@ -627,6 +636,18 @@ def priority_groups(row, cfg):
             + [t for t in pr.get("tags", []) if t.lower() in tags])
 
 
+def relevant_role(row, cfg):
+    """True if the title is a data/ML/AI job ([priority].role_keywords), or you picked
+    the person yourself. A blank title counts as relevant (nothing to judge)."""
+    if (row.get("source") or "").strip() == HAND_PICKED:
+        return True
+    title = (row.get("title") or "").lower()
+    if not title.strip():
+        return True
+    words = (cfg.get("priority") or {}).get("role_keywords", DEFAULT_PRIORITY["role_keywords"])
+    return any(re.search(rf"\b{re.escape(w.lower())}\b", title) for w in words)
+
+
 def priority_score(row, cfg):
     """How many priority groups a row matches; higher is staged first."""
     return len(priority_groups(row, cfg))
@@ -645,6 +666,13 @@ def save_state(cfg, state):
     path = cfg["files"]["send_state"]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     _atomic_write(path, lambda f: json.dump(state, f, indent=2))
+
+
+def record_send_run(cfg, **info):
+    """Remember what the latest real send did (for `outreach feedback`)."""
+    state = load_state(cfg)
+    state["last_send"] = {"date": datetime.date.today().isoformat(), **info}
+    save_state(cfg, state)
 
 
 def first_send_date(sent_rows):

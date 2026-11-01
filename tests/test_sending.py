@@ -327,3 +327,23 @@ def test_health_spam_result_inbox_is_fine(tmp_path, capsys):
     outreach_cli.cmd_health(argparse.Namespace(spam_check="inbox", no_imap=True), cfg)
     out = capsys.readouterr().out
     assert "inbox. Good." in out and "13 emails/day" in out
+
+
+def test_resume_link_shown_as_short_clickable_text(monkeypatch, tmp_path):
+    rows = [_person("pat@corp.com", type="referral")]
+    blanks = ('[blanks]\nresume_link = "https://drive.example/cv?usp=drive_link"\n'
+              'resume_link_text = "Selena Su Resume"\n')
+    fake, _ = _send(monkeypatch, _workspace(tmp_path, rows, blanks=blanks), "--send", "--yes")
+    msg = fake.sent[0]
+    plain = msg.get_body(preferencelist=("plain",)).get_content()
+    page = msg.get_body(preferencelist=("html",)).get_content()
+    assert "https://drive.example/cv?usp=drive_link" in plain          # full link kept
+    assert '<a href="https://drive.example/cv?usp=drive_link">Selena Su Resume</a>' in page
+    assert page.count("drive.example") == 1                            # only inside the link
+
+
+def test_no_link_text_means_plain_email_only(monkeypatch, tmp_path):
+    fake, _ = _send(monkeypatch, _workspace(tmp_path, [_person("pat@corp.com",
+                                                               type="referral")]),
+                    "--send", "--yes")
+    assert fake.sent[0].get_body(preferencelist=("html",)) is None

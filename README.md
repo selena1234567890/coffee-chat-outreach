@@ -91,6 +91,17 @@ nobody who replied gets a follow-up.
   `referral_given`, `interview`, `offer` (these count as good results), `not_interested`,
   `no_reply`.
 - The report checks Gmail for new replies first (`--no-imap` to skip), so the numbers are current.
+- `outreach feedback [--email]`: the short daily report (sent, failed, bounced, held, new replies,
+  response and referral rates, Deepline credit warnings). It says "Everything's good" when nothing
+  needs you; `--email` sends it to your own Gmail address.
+
+**Resume link:** set `[blanks].resume_link_text` (e.g. "Selena Su Resume") and emails show that
+short name as a clickable link instead of the long Drive address (the plain-text copy keeps the full
+link).
+
+**Data/ML/AI roles first:** people whose title has none of `[priority].role_keywords` (data, ML, AI,
+scientist, analytics, ...) are staged last, only when nobody better is left; a referral counts most
+from someone in the same field.
 
 ### Safety checks before every send (`guard.py`)
 

@@ -31,17 +31,24 @@ person found + ~0.5 per email lookup). The user decided (2026-11-01) that this r
 adds to the queue **without asking first**, because every line is the fixed Emory
 sentence and `outreach add` checks every lead.
 
-1. **Credits.** Run `deepline billing balance`. Spend at most **6 credits per run**.
-   If the balance is under 2, stop and report "Deepline credits are almost gone".
-2. **Is a refill needed?** `.venv/bin/outreach status`. If the queue already holds 2+
-   days of sends (≥ 2 × today's ramp number), stop: nothing to do.
+1. **How many people to find.** The sending ramp grows (13 → 18 → 25 → 35 a day), so
+   the finder grows with it. Today's ramp number is in `.venv/bin/outreach health`
+   ("Ramp: step N of 4, X emails/day"). Goal: the queue holds **2 days of sends**
+   (2 × X). If `.venv/bin/outreach status` shows the queue (backlog) already has
+   that many, stop: nothing to do. Otherwise find (2 × X − queue) people, plus about
+   half again because some won't have a verified email or will be skipped.
+2. **Credits.** Run `deepline billing usage`. Budget about 0.8 credits per person
+   wanted, and never more than **30 credits in one run**. If the balance or the monthly
+   cap left is smaller, find as many as it allows and say so in your report (the user
+   gets a top-up warning in the daily email). If the balance is under 2, stop and
+   report "Deepline credits are almost gone".
 3. **Search** (`deepline describe icypeas_find_people` shows the fields):
    write `data/leads/deepline-query-<YYYY-MM-DD>.json` like `data/leads/icypeas-query.json`:
    school "Emory University", `currentJobTitle` from `[search].titles` in `config.toml`,
    location "United States", and `currentCompanyWebsite` = target company domains, but
    **leave out** companies in `data/covered_companies.csv` and companies already at
    their per-company limit (`outreach find` lists companies already contacted).
-   Page size 10–20. If the result gives a next-page token, save it to
+   Page size = the number of people wanted (at most 50). If the result gives a next-page token, save it to
    `data/leads/deepline-next-page.txt` and pass it next time so you get new people.
    `deepline tools execute icypeas_find_people --input @<query file>` and save the
    results as `data/leads/deepline-people-<YYYY-MM-DD>.csv`.

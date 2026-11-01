@@ -29,6 +29,7 @@ One-time Keychain setup (stores the Gmail APP password, encrypted, not on disk):
 """
 import argparse
 import datetime
+import html
 import mimetypes
 import os
 import random
@@ -54,7 +55,16 @@ def build_message(row, headers, body, base_dir):
     if row.get("in_reply_to"):  # a follow-up: keep it in the same email thread
         msg["In-Reply-To"] = row["in_reply_to"]
         msg["References"] = row["in_reply_to"]
-    msg.set_content(common.render(body, row))
+    text = common.render(body, row)
+    msg.set_content(text)
+    link = (row.get("resume_link") or "").strip()
+    label = (row.get("resume_link_text") or "").strip()
+    if link and label and link in text:
+        # Show a short clickable name instead of the long link; the plain-text copy
+        # (for mail apps without HTML) keeps the full link.
+        a = f'<a href="{html.escape(link, quote=True)}">{html.escape(label)}</a>'
+        page = html.escape(text).replace(html.escape(link), a).replace("\n", "<br>\n")
+        msg.add_alternative(f"<div>{page}</div>", subtype="html")
     attach = headers.get("ATTACHMENT")
     if attach:
         path = common.resolve(common.render(attach, row), base_dir)
@@ -209,6 +219,10 @@ def main():
         print(f"SAFETY STOP: more than {guard.settings(cfg)['max_problem_percent']}% of "
               f"this batch has a problem, so nothing will be sent. Fix the problems above.")
         if args.send or args.test or args.spam_check:
+            if args.send:
+                common.record_send_run(cfg, sent=0, failed=[], held=len(held), stopped=True,
+                                       problems=sorted({x for _, c in held for k, x in c
+                                                        if k == guard.PROBLEM}))
             sys.exit(2)
 
     print(f"=== {len(plan)} email(s) staged ===\n")
@@ -238,6 +252,12 @@ def main():
 
     if not plan:
         print("Nothing passed the safety checks, so nothing to send.")
+        if held:  # still move them to the held list, so they wait for your OK there
+            common.backup(DB)
+            common.hold_rows(cfg, [{**r, "held_reason": "; ".join(x for _, x in c)}
+                                   for r, c in held])
+            common.write_db(DB, fieldnames, [], ignore_extra=True)
+            common.record_send_run(cfg, sent=0, failed=[], held=len(held), stopped=False)
         return
     if not args.yes:
         ok = input(f"Send {len(plan)} email(s)? [y/N] ").strip().lower()
@@ -307,6 +327,9 @@ def main():
             print(f"  sent -> {r['contact_email']} ({r.get('company')})")
             sent_n += 1
 
+    common.record_send_run(cfg, sent=sent_n, held=len(held), stopped=False,
+                           failed=[f"{r['contact_email']} ({r.get('company')})" for r in failed],
+                           not_sent=len(remaining))
     if sent_n:
         print(f"\nDone. {sent_n} sent and archived to {os.path.basename(LOG)}.")
         if remaining:
