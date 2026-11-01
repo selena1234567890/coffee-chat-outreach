@@ -17,9 +17,11 @@ Commands:
 """
 import argparse
 import collections
+import csv
 import datetime
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -855,6 +857,89 @@ def cmd_from_apollo(args, cfg):
         print(f"  {lead['first_name']} {lead['last_name']}, {lead['title']} at {lead['company']}")
 
 
+EMORY_LINE = ("I noticed you have also studied in Emory and was genuinely impressed by "
+              "your work as {article} {title} at {company}.")
+LOOKING_WORDS = ("looking for", "open to work", "seeking", "job search", "between roles")
+
+
+def short_title(title):
+    """'Sr Data Scientist - Flight Safety, Ads' -> 'Senior Data Scientist' (for the line)."""
+    t = re.split(r" [-|–] |, | \(|\|", (title or "").strip())[0].strip()
+    return re.sub(r"\bSr\.?(?=\s)", "Senior", t)
+
+
+def moved_reason(headline, company):
+    """Why the LinkedIn headline suggests this person isn't at `company` now, or None.
+    Deepline's job data can lag; an email to an old job bounces or reaches the wrong
+    person, so we skip anyone whose own headline disagrees."""
+    h = (headline or "").lower()
+    if any(w in h for w in LOOKING_WORDS):
+        return "headline says they're looking for a job (may have left)"
+    key = common._company_key(company).split(" ")[0]
+    named = re.findall(r"(?:@|\bat\b)\s*([a-z][\w&.\- ]{1,30})", h)
+    if named and key and not any(key in n for n in named):
+        return f"headline names another company ({named[0].strip()}), may have moved"
+    return None
+
+
+def deepline_to_leads(people, emails, cfg):
+    """Join a Deepline people search (icypeas_find_people CSV) with its email
+    waterfall results (CSV) into Emory-alumni leads. Returns (leads, skipped)."""
+    by_url = {(e.get("linkedin_url") or "").rstrip("/"): e for e in emails}
+    leads, skipped = [], []
+    for p in people:
+        name = f"{p.get('firstname', '')} {p.get('lastname', '')}".strip()
+        url = (p.get("profileUrl") or "").rstrip("/")
+        e = by_url.get(url, {})
+        email = (e.get("email") or "").strip()
+        if not email or (e.get("email_validated") or "").lower() != "true":
+            skipped.append((name, "no verified work email found"))
+            continue
+        company = p.get("lastCompanyName") or e.get("company_name") or ""
+        reason = moved_reason(p.get("headline"), company)
+        if reason:
+            skipped.append((name, reason))
+            continue
+        title = short_title(p.get("lastJobTitle"))
+        leads.append({
+            "first_name": re.sub(r"\s*\(.*?\)", "", p.get("firstname") or "").strip(),
+            "last_name": (p.get("lastname") or "").strip().rstrip("."),
+            "company": company,
+            "company_size": p.get("lastCompanySize") or "",
+            "company_domain": common.main_domain(p.get("lastCompanyWebsite") or e.get("domain")),
+            "title": (p.get("lastJobTitle") or "").strip(),
+            "contact_email": email,
+            "email_status": "verified",
+            "school": "Emory University",
+            "start_date": p.get("lastJobStartDate") or "",
+            "linkedin_url": url,
+            "source": "deepline",
+            "personal_line": EMORY_LINE.format(
+                article="an" if title[:1].lower() in "aeiou" else "a",
+                title=title, company=company),
+            "personal_source": url,
+        })
+    return leads, skipped
+
+
+def cmd_from_deepline(args, cfg):
+    """Convert Deepline results (people search CSV + email waterfall CSV) into a leads
+    file for `outreach add`. Keeps verified emails only; skips people who moved."""
+    try:
+        people = list(csv.DictReader(open(args.people, encoding="utf-8")))
+        emails = list(csv.DictReader(open(args.emails, encoding="utf-8")))
+    except OSError as e:
+        raise SystemExit(f"ERROR: can't read Deepline results: {e}")
+    leads, skipped = deepline_to_leads(people, emails, cfg)
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump(leads, f, indent=2, ensure_ascii=False)
+    print(f"{len(leads)} lead(s) of {len(people)} -> {args.out}")
+    for lead in leads:
+        print(f"  {lead['first_name']} {lead['last_name']}, {lead['title']} at {lead['company']}")
+    for name, why in skipped:
+        print(f"  - skipped {name}: {why}")
+
+
 ADD_REQUIRED = ("contact_email", "first_name", "company")
 
 
@@ -945,7 +1030,8 @@ COMMANDS = {
     "stage": cmd_stage, "preview": cmd_preview, "replies": cmd_replies,
     "followup": cmd_followup, "migrate": cmd_migrate,
     "backfill-dates": cmd_backfill_dates, "add": cmd_add,
-    "from-apollo": cmd_from_apollo, "health": cmd_health, "mark": cmd_mark,
+    "from-apollo": cmd_from_apollo, "from-deepline": cmd_from_deepline,
+    "health": cmd_health, "mark": cmd_mark,
     "report": cmd_report, "daily": cmd_daily,
 }
 
@@ -977,6 +1063,10 @@ def main():
                            help="skip checking Gmail for bounces")
         if name == "from-apollo":
             p.add_argument("file", help="Apollo saved-contacts search result (JSON)")
+            p.add_argument("-o", "--out", required=True, help="leads JSON file to write")
+        if name == "from-deepline":
+            p.add_argument("people", help="Deepline people search results (CSV)")
+            p.add_argument("emails", help="Deepline email waterfall results (CSV)")
             p.add_argument("-o", "--out", required=True, help="leads JSON file to write")
         if name == "backfill-dates":
             p.add_argument("--apply", action="store_true",

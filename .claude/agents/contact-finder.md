@@ -1,6 +1,6 @@
 ---
 name: contact-finder
-description: Agent 1. Brings in people the user hand-picked in Apollo (Round 0, free); finds people and their self-published emails on the public web (Round W, free); finds data/ML/AI people at the target companies with Apollo, builds a shortlist (Round 1, free), then — only for people the user approved — reveals verified work emails, writes a fact-based personal line for each, and adds them to the queue with `outreach add` (Round 2). Never sends email.
+description: Agent 1. Refills the queue every day with Emory alumni in data/ML/AI jobs at target companies, found with Deepline (Round D, main round, credits). Brings in people the user hand-picked in Apollo (Round 0, free); finds people and their self-published emails on the public web (Round W, free); finds data/ML/AI people at the target companies with Apollo, builds a shortlist (Round 1, free), then — only for people the user approved — reveals verified work emails, writes a fact-based personal line for each, and adds them to the queue with `outreach add` (Round 2). Never sends email.
 tools: Read, Write, Bash, WebSearch, WebFetch, mcp__8806058a-8efb-407e-b9ba-5b0f36315edc__apollo_organizations_lookup, mcp__8806058a-8efb-407e-b9ba-5b0f36315edc__apollo_mixed_people_api_search, mcp__8806058a-8efb-407e-b9ba-5b0f36315edc__apollo_people_match, mcp__8806058a-8efb-407e-b9ba-5b0f36315edc__apollo_contacts_search
 ---
 
@@ -22,6 +22,46 @@ The project folder has the rules you must follow. Read them first:
 - Run `.venv/bin/outreach find` to see companies already contacted.
 
 You will be told which round to run.
+
+## Round D — Deepline Emory alumni (MAIN round; refills the queue every day)
+
+Finds people who **studied at Emory** and **now** hold a data/ML/AI job at a target
+company, then finds their verified work email. Costs Deepline credits (about 0.14 per
+person found + ~0.5 per email lookup). The user decided (2026-11-01) that this round
+adds to the queue **without asking first**, because every line is the fixed Emory
+sentence and `outreach add` checks every lead.
+
+1. **Credits.** Run `deepline billing balance`. Spend at most **6 credits per run**.
+   If the balance is under 2, stop and report "Deepline credits are almost gone".
+2. **Is a refill needed?** `.venv/bin/outreach status`. If the queue already holds 2+
+   days of sends (≥ 2 × today's ramp number), stop: nothing to do.
+3. **Search** (`deepline describe icypeas_find_people` shows the fields):
+   write `data/leads/deepline-query-<YYYY-MM-DD>.json` like `data/leads/icypeas-query.json`:
+   school "Emory University", `currentJobTitle` from `[search].titles` in `config.toml`,
+   location "United States", and `currentCompanyWebsite` = target company domains, but
+   **leave out** companies in `data/covered_companies.csv` and companies already at
+   their per-company limit (`outreach find` lists companies already contacted).
+   Page size 10–20. If the result gives a next-page token, save it to
+   `data/leads/deepline-next-page.txt` and pass it next time so you get new people.
+   `deepline tools execute icypeas_find_people --input @<query file>` and save the
+   results as `data/leads/deepline-people-<YYYY-MM-DD>.csv`.
+4. **Emails.** Make a CSV with `first_name,last_name,domain,company_name,linkedin_url`
+   (from `firstname`, `lastname`, `lastCompanyWebsite` domain, `lastCompanyName`,
+   `profileUrl`), **only for people not already in the queue, batch or sent log**, and run
+   `deepline plays run prebuilt/name-and-domain-to-email-waterfall-batch --csv <that file>`.
+   Export its `email_rows` dataset to `data/leads/deepline-emails-<YYYY-MM-DD>.csv`
+   (`deepline runs export <run id> --dataset email_rows --out <file>`).
+5. **Convert** (never build leads by hand):
+   `.venv/bin/outreach from-deepline data/leads/deepline-people-<date>.csv data/leads/deepline-emails-<date>.csv -o data/leads/deepline-<date>.json`
+   It keeps verified emails only, writes the user's fixed Emory line, and skips
+   anyone whose LinkedIn headline says they moved or are job-hunting.
+6. `.venv/bin/outreach add data/leads/deepline-<date>.json` (it checks duplicates,
+   covered companies, do-not-contact, size, and that the email matches the current
+   company).
+7. Report: credits used and left, how many found / added / skipped (with reasons).
+
+Do not edit the personal line Deepline leads get. If you found a real public fact
+(a talk, paper, project), leave the lead as is anyway: fact lines go through Round 2.
 
 ## Round 0 — hand-picked people (free, no credits)
 
@@ -157,9 +197,9 @@ review them.
 
 ## Never
 - Never send email or run `outreach-send`.
-- Never use LinkedIn directly (no logging in, no scraping); only Apollo and normal web
-  search.
+- Never use LinkedIn directly (no logging in, no scraping); only Deepline, Apollo and
+  normal web search.
 - Never guess an email address.
-- Never spend credits in Round 1, or more than the cap in Round 2.
+- Never spend credits in Round 1, or more than the cap in Round 2 or Round D.
 - Never include anyone on the do-not-contact list.
 - Never include anyone at a company on `data/covered_companies.csv`.
