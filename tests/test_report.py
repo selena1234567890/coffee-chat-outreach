@@ -122,3 +122,15 @@ def test_mark_rejects_unknown_outcome_and_unknown_person(tmp_path):
         outreach_cli.cmd_mark(argparse.Namespace(email="a@g.com", outcome="maybe"), cfg)
     with pytest.raises(SystemExit, match="not in sent.csv"):
         outreach_cli.cmd_mark(argparse.Namespace(email="z@g.com", outcome="interview"), cfg)
+
+
+def test_report_headline_metrics(tmp_path, capsys):
+    rows = [_sent("a@g.com", last_reply="2026-11-03T10:00:00Z", outcome="referral_given"),
+            _sent("b@g.com", type="coffee_chat", last_reply="2026-11-03T10:00:00Z",
+                  outcome="referral_given"),
+            _sent("c@g.com", last_reply="2026-11-04T10:00:00Z"),
+            _sent("d@g.com")]
+    out = _report(_cfg(tmp_path, rows), capsys)
+    assert "RESPONSE RATE:          3 replied / 4 emailed = 75%" in out
+    assert "REFERRAL SUCCESS RATE:  2 referrals / 4 emailed = 50%" in out
+    assert "of the 3 referral asks: 1 = 33%" in out

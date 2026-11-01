@@ -134,7 +134,7 @@ def main():
         em = common.normalize_email(r.get("contact_email"))
         if not em:
             n_blank += 1
-        elif common.on_do_not_contact(r, cfg):
+        elif common.skip_reason(r, cfg):
             n_dnc += 1
         elif (em in followed if (r.get("type") or "").strip().lower() == "followup"
               else em in already):
@@ -147,7 +147,7 @@ def main():
     for label, n in (("already in the sent log", n_sent),
                      ("duplicated within this batch", n_dup),
                      ("missing a contact_email", n_blank),
-                     ("on the do-not-contact list", n_dnc)):
+                     ("on the do-not-contact list or at a covered company", n_dnc)):
         if n:
             print(f"Skipping {n} row(s) {label}.")
     if n_sent or n_dup or n_blank or n_dnc:

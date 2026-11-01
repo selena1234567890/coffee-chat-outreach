@@ -48,6 +48,7 @@ DEFAULT_FILES = {
     "resume": "resume.pdf",
     "targets": "data/target_companies.csv",
     "do_not_contact": "data/do_not_contact.csv",
+    "covered_companies": "data/covered_companies.csv",
     "send_state": "data/send_state.json",
 }
 DEFAULT_PACING = {"batch_size": 14, "followup_after_days": 6}
@@ -135,6 +136,7 @@ queue = "outreach_queue.csv"
 resume = "resume.pdf"
 targets = "data/target_companies.csv"        # company, domain, tier (you edit)
 do_not_contact = "data/do_not_contact.csv"   # people never to cold email (private)
+covered_companies = "data/covered_companies.csv"   # companies where you already have a referral
 
 # One template per email type. Each row's `type` column picks its template.
 # Leave this section out to use the single [files].template for every row.
@@ -478,6 +480,44 @@ def has_open_roles(row):
 def _do_not_contact_list(path):
     return tuple(r for r in _csv_rows(path)
                  if any((r.get(k) or "").strip() for k in ("contact_email", "first_name")))
+
+
+def _company_key(name):
+    """'JPMorgan Chase & Co.' -> 'jpmorgan chase' (lowercase, no punctuation/suffixes)."""
+    text = re.sub(r"[^a-z0-9 ]", " ", (name or "").lower())
+    text = re.sub(r"\b(inc|llc|ltd|corp|corporation|co|company|the|group|plc)\b", " ", text)
+    return " ".join(text.split())
+
+
+@functools.lru_cache(maxsize=None)
+def _covered_list(path):
+    return tuple((_company_key(r.get("company")),
+                  tuple(d.strip().lower() for d in re.split(r"[;, ]+", r.get("domains") or "")
+                        if d.strip()))
+                 for r in _csv_rows(path) if (r.get("company") or "").strip())
+
+
+def covered_company(row, cfg):
+    """True if the row's company is on data/covered_companies.csv: you already have a
+    referral there, so nobody else at that company should be contacted. Matches the
+    company name loosely ("Capital One Financial" ~ "Capital One") or the email domain."""
+    company = _company_key(row.get("company"))
+    domain = email_domain(row.get("contact_email"))
+    for name, domains in _covered_list((cfg.get("files") or {}).get("covered_companies")):
+        if company and name and (name in company or company in name):
+            return True
+        if domain and any(domain == d or domain.endswith("." + d) for d in domains):
+            return True
+    return False
+
+
+def skip_reason(row, cfg):
+    """Why this person must never get an email, or None."""
+    if on_do_not_contact(row, cfg):
+        return "on the do-not-contact list"
+    if covered_company(row, cfg):
+        return "company already covered (you have a referral there)"
+    return None
 
 
 def on_do_not_contact(row, cfg):

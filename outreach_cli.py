@@ -180,7 +180,7 @@ def due_followups(sent_rows, db_rows, cfg, today=None):
         email = common.normalize_email(r.get("contact_email"))
         if (_is_followup(r) or email in done or not r.get("message_id")
                 or (r.get("last_reply") or "").strip() or (r.get("bounced_at") or "").strip()
-                or common.on_do_not_contact(r, cfg)):
+                or common.skip_reason(r, cfg)):
             continue
         sent = common.first_send_date([r])
         if sent is None or business_days_between(sent, today) < fu["after_business_days"]:
@@ -287,8 +287,8 @@ def cmd_stage(args, cfg):
             if email in blk_emails:
                 dropped += 1                 # already sent or staged -> remove from queue
                 gone.add(id(orig))
-            elif common.on_do_not_contact(r, cfg):
-                blocked.append(r)            # on the do-not-contact list -> remove
+            elif common.skip_reason(r, cfg):
+                blocked.append(r)            # do-not-contact or covered company -> remove
                 gone.add(id(orig))
             elif common.too_small(r, cfg):
                 why[id(orig)] = "small"      # under min_employees -> stays in queue
@@ -341,8 +341,8 @@ def cmd_stage(args, cfg):
         print(f"  + {tier} [{r['type']}] {r.get('company')} <{r.get('contact_email')}>"
               f"{roles}{star}")
     for r in blocked:
-        print(f"  x removed (do-not-contact list): {r.get('first_name')} {r.get('last_name')}"
-              f" at {r.get('company')}")
+        print(f"  x removed ({common.skip_reason(r, cfg)}): {r.get('first_name')} "
+              f"{r.get('last_name')} at {r.get('company')}")
     _print_waiting(waiting, used_today, daily, used_tier, tier_cap)
     print("\nNext: `outreach preview`, then `outreach-send --test`, then `outreach-send --send`.")
 
@@ -567,7 +567,17 @@ def cmd_report(args, cfg):
     after_fu = sum(p["replied_after_followup"] for p in replied)
     outcomes = collections.Counter(p["outcome"] for p in results if p["outcome"])
     good = sum(outcomes[o] for o in common.POSITIVE_OUTCOMES)
+    referrals = outcomes["referral_given"]
     print(f"=== Outreach report: {n} people emailed ===")
+    print(f"  RESPONSE RATE:          {len(replied)} replied / {n} emailed = "
+          f"{_rate(len(replied), n).strip()}")
+    print(f"  REFERRAL SUCCESS RATE:  {referrals} referrals / {n} emailed = "
+          f"{_rate(referrals, n).strip()}")
+    asks = [p for p in results if p["groups"]["type"][0] == "referral"]
+    if asks:
+        got = sum(p["outcome"] == "referral_given" for p in asks)
+        print(f"    (of the {len(asks)} referral asks: {got} = {_rate(got, len(asks)).strip()}; "
+              f"referrals can also come from coffee chats)")
     print(f"  Bounced: {bounced} ({_rate(bounced, n).strip()})   "
           f"Replied: {len(replied)} ({_rate(len(replied), n - bounced).strip()} of delivered)"
           f"   Good results: {good}")
@@ -864,8 +874,8 @@ def check_lead(r, cfg, known_emails):
         seen = common.years_ago(r.get("email_seen"))
         if seen is not None and seen > search["max_email_age_years"]:
             return f"public email last seen {seen:.1f} years ago (too old, may bounce)"
-    if common.on_do_not_contact(r, cfg):
-        return "on the do-not-contact list"
+    if common.skip_reason(r, cfg):
+        return common.skip_reason(r, cfg)
     if common.too_small(r, cfg):
         return "company under min_employees"
     return None

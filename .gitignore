@@ -49,3 +49,6 @@ data/send_state.json
 
 # Emory alumni list (real people; private)
 data/emory_alumni*
+
+# Companies where you already have a referral (private)
+data/covered_companies.csv

@@ -22,6 +22,7 @@ queue = "outreach_queue.csv"
 resume = "resume.pdf"
 targets = "data/target_companies.csv"        # company, domain, tier (you edit)
 do_not_contact = "data/do_not_contact.csv"   # people never to cold email (private)
+covered_companies = "data/covered_companies.csv"   # companies where you already have a referral
 
 # One template per email type. Each row's `type` column (in the CSV) picks one.
 # Copy the .example files in templates/ and write your own wording.

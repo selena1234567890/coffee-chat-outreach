@@ -284,3 +284,39 @@ def test_big_tier_cannot_use_up_a_type_limit_before_small_tiers_get_theirs(tmp_p
                company_limits={**common.DEFAULT_COMPANY_LIMITS, "large": 50})
     staged, _ = _stage(cfg, _mixed_queue(20, 10, 5))
     assert _tiers(staged) == {"3": 1, "2": 4, "1": 5}   # shares 8/4/1 of 14; 10 referrals
+
+
+# --- covered companies (already have a referral there) -------------------------
+
+def _covered_cfg(tmp_path):
+    cfg = _cfg(tmp_path)
+    (tmp_path / "covered.csv").write_text("company,domains,note\n"
+                                          "Capital One,capitalone.com,have referral\n"
+                                          "Meta,meta.com;fb.com,\n")
+    cfg["files"]["covered_companies"] = str(tmp_path / "covered.csv")
+    return cfg
+
+
+def test_covered_company_matching(tmp_path):
+    cfg = _covered_cfg(tmp_path)
+    assert common.covered_company({"company": "Capital One Financial Corp."}, cfg)
+    assert common.covered_company({"company": "Something", "contact_email": "a@fb.com"}, cfg)
+    assert not common.covered_company({"company": "Google", "contact_email": "a@google.com"}, cfg)
+    assert common.skip_reason({"company": "Meta"}, cfg) == \
+        "company already covered (you have a referral there)"
+
+
+def test_stage_removes_people_at_covered_companies(tmp_path, capsys):
+    cfg = _covered_cfg(tmp_path)
+    staged, left = _stage(cfg, [_person("a@capitalone.com", company="Capital One"),
+                                _person("b@google.com")])
+    assert [r["contact_email"] for r in staged] == ["b@google.com"]
+    assert left == []
+    assert "company already covered" in capsys.readouterr().out
+
+
+def test_no_followups_to_covered_companies(tmp_path):
+    cfg = _covered_cfg(tmp_path)
+    sent = {**_person("a@capitalone.com", company="Capital One"), "type": "referral",
+            "sent_at": "2026-10-01T12:00:00Z", "message_id": "<a@x>"}
+    assert outreach_cli.due_followups([sent], [], cfg) == []

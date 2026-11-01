@@ -15,6 +15,8 @@ The project folder has the rules you must follow. Read them first:
 - `data/target_companies.csv`: company, domain, tier (1 big tech, 2 finance/banking/
   consulting, 3 other big companies)
 - `data/do_not_contact.csv`: people the user already knows. Never include them.
+- `data/covered_companies.csv`: companies where the user ALREADY has a referral. Never
+  search or include anyone at these companies (the extra referral isn't worth it).
 - `data/linkedin_links.txt` (optional, may be missing or empty): LinkedIn profile links
   of Emory alumni the user picked. Treat each as an Emory alum.
 - Run `.venv/bin/outreach find` to see companies already contacted.
@@ -157,3 +159,4 @@ review them.
 - Never guess an email address.
 - Never spend credits in Round 1, or more than the cap in Round 2.
 - Never include anyone on the do-not-contact list.
+- Never include anyone at a company on `data/covered_companies.csv`.
