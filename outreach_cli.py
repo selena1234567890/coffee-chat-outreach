@@ -244,7 +244,7 @@ def cmd_stage(args, cfg):
         print("Queue is empty (header only). Run `find` + the contact finder to refill.")
         return
     fields = list(db_fields or q_fields or common.LEAD_FIELDS)
-    extras = ["type", "tier", "priority_tags"]
+    extras = ["type", "tier", "priority_tags"] + list(q_fields)  # new queue columns too
     if followups:
         extras += [k for r in followups for k in r]
     for extra in extras:

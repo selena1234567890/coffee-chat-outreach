@@ -36,7 +36,7 @@ def test_all_good_day(tmp_path):
     subject, text = _feedback(_setup(tmp_path, rows, run={"sent": 13, "failed": [], "held": 0}))
     assert subject == "Outreach Nov 2: all good"
     assert "Everything's good." in text and "Needs you" not in text
-    assert "Sent 13 email(s)." in text
+    assert "Sent 13 email(s)" in text
     assert "New replies (last 24 hours): Ann Lee (Google)" in text
     assert "RESPONSE RATE:          2 replied / 2 emailed = 100%" in text
     assert "REFERRAL SUCCESS RATE:  1 referrals / 2 emailed = 50%" in text
