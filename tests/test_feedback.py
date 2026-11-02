@@ -37,7 +37,10 @@ def test_all_good_day(tmp_path):
     assert subject == "Outreach Nov 2: all good"
     assert "Everything's good." in text and "Needs you" not in text
     assert "Sent 13 email(s)" in text
-    assert "New replies (last 24 hours): Ann Lee (Google)" in text
+    assert "SENT TODAY:                  13" in text
+    assert "HELD, WAITING FOR YOUR REVIEW: 0" in text
+    assert "NEW REAL REPLIES (24 hours): 1" in text
+    assert "not counted): Ann Lee (Google)" in text
     assert "RESPONSE RATE:          2 replied / 2 emailed = 100%" in text
     assert "REFERRAL SUCCESS RATE:  1 referrals / 2 emailed = 50%" in text
 
@@ -49,9 +52,11 @@ def test_problems_are_listed(tmp_path):
     common.hold_rows(cfg, [{"contact_email": "h@g.com"}, {"contact_email": "i@g.com"}])
     subject, text = _feedback(cfg, credits=None)
     assert "need you" in subject
-    for part in ("1 failed to send: x@y.com (Y)", "1 bounced: a@g.com",
-                 "2 email(s) held for your OK", "Queue is low: 1 people left",
-                 "Couldn't check Deepline credits"):
+    for part in ("1 failed to send: x@y.com (Y)", "won't be emailed again): a@g.com",
+                 "HELD, WAITING FOR YOUR REVIEW: 2", "2 email(s) held, waiting for your review",
+                 "BOUNCED TODAY (bad address): 1", "Only 1 people are waiting",
+                 "Couldn't check Deepline credits", "EMAILS WAITING FOR YOUR REVIEW (2)",
+                 "the email to h@g.com", "approve Ao Xu"):
         assert part in text, part
 
 

@@ -55,8 +55,8 @@ def test_stage_moves_dedups_and_respects_n(tmp_path):
 class _FakeIMAP:
     """IMAP stand-in backed by an in-memory message store.
 
-    Each message: {"box": mailbox, "uid": int, "h": {header: value}}. Supports the
-    searches backfill uses: TO, FROM, and HEADER REFERENCES/In-Reply-To.
+    Each message: {"box": mailbox, "uid": int, "h": {header: value}, "body": text}.
+    Supports the searches backfill uses: TO, FROM, SUBJECT, HEADER REFERENCES/In-Reply-To.
     """
     def __init__(self, messages):
         self.msgs = messages
@@ -71,7 +71,7 @@ class _FakeIMAP:
 
     @staticmethod
     def _match(m, crit):
-        if crit[0] in ("TO", "FROM"):
+        if crit[0] in ("TO", "FROM", "SUBJECT"):
             return crit[1].strip('"').lower() in (m["h"].get(crit[0].title(), "")).lower()
         if crit[0] == "HEADER":
             field, val = crit[1], crit[2].strip('"')
@@ -88,6 +88,8 @@ class _FakeIMAP:
             m = next((x for x in self._box() if x["uid"] == uid), None)
             if not m:
                 return ("OK", [None])
+            if "FIELDS" not in spec:                       # body (TEXT or whole message)
+                return ("OK", [(b"meta", m.get("body", "").encode())])
             fields = re.search(r"FIELDS \(([^)]+)\)", spec).group(1).split()
             raw = "".join(f"{f}: {m['h'].get(f, '')}\r\n" for f in fields) + "\r\n"
             return ("OK", [(b"meta", raw.encode())])
@@ -183,6 +185,75 @@ def test_backfill_from_match_still_catches_same_address_reply(tmp_path, monkeypa
     assert rows[0]["last_reply"] == "2026-06-04T16:00:00Z"
 
 
+def _backfill_cfg(tmp_path, sent_log):
+    return {"files": {"queue": str(tmp_path / "q.csv"), "database": str(tmp_path / "db.csv"),
+                      "sent_log": str(sent_log), "send_state": str(tmp_path / "state.json")},
+            "email": {"address": "me@x.com", "keychain_service": "svc",
+                      "imap_host": "imap.example.com"}}
+
+
+def test_backfill_bounce_and_auto_reply_are_not_replies(tmp_path, monkeypatch):
+    sent_log = tmp_path / "sent.csv"
+    common.write_db(str(sent_log), ["contact_email", "company", "last_reply"],
+                    [{"contact_email": "natalief@adobe.com", "company": "Adobe",
+                      # an earlier run counted the bounce notice as a reply
+                      "last_reply": "2026-11-02T17:20:00Z"},
+                     {"contact_email": "ooo@b.com", "company": "B", "last_reply": ""},
+                     {"contact_email": "real@c.com", "company": "C", "last_reply": ""}])
+    msgs = [
+        {"box": SENT, "uid": 1, "h": {"To": "natalief@adobe.com", "From": "me@x.com",
+            "Date": "Mon, 02 Nov 2026 12:18:00 -0500", "Message-ID": "<n@gmail.com>"}},
+        {"box": SENT, "uid": 2, "h": {"To": "ooo@b.com", "From": "me@x.com",
+            "Date": "Mon, 02 Nov 2026 12:18:00 -0500", "Message-ID": "<o@gmail.com>"}},
+        {"box": SENT, "uid": 3, "h": {"To": "real@c.com", "From": "me@x.com",
+            "Date": "Mon, 02 Nov 2026 12:18:00 -0500", "Message-ID": "<r@gmail.com>"}},
+        # Office 365 bounce: from postmaster at THEIR domain, in our thread
+        {"box": ALL, "uid": 10, "h": {"From": "postmaster@adobe.com", "To": "me@x.com",
+            "Subject": "Undeliverable: Coffee Chat Request",
+            "Date": "Mon, 02 Nov 2026 12:20:00 -0500", "References": "<n@gmail.com>"},
+         "body": "Your message to natalief@adobe.com couldn't be delivered."},
+        # out-of-office from the person themself
+        {"box": ALL, "uid": 11, "h": {"From": "ooo@b.com", "To": "me@x.com",
+            "Subject": "Automatic reply: Coffee Chat Request", "Auto-Submitted": "auto-replied",
+            "Date": "Mon, 02 Nov 2026 12:21:00 -0500", "In-Reply-To": "<o@gmail.com>"},
+         "body": "I am out of the office until Nov 9."},
+        # a real reply
+        {"box": ALL, "uid": 12, "h": {"From": "real@c.com", "To": "me@x.com",
+            "Subject": "Re: Coffee Chat Request",
+            "Date": "Mon, 02 Nov 2026 14:00:00 -0500", "In-Reply-To": "<r@gmail.com>"},
+         "body": "Hi Selena, happy to chat! Does Thursday work?"},
+    ]
+    monkeypatch.setattr(common, "get_password", lambda *a, **k: "pw")
+    monkeypatch.setattr(common, "imap_login", _login_selecting(_FakeIMAP(msgs)))
+    outreach_cli.cmd_backfill_dates(argparse.Namespace(apply=True),
+                                    _backfill_cfg(tmp_path, sent_log))
+
+    _, rows = common.read_rows(str(sent_log))
+    by = {r["contact_email"]: r for r in rows}
+    assert by["natalief@adobe.com"]["last_reply"] == ""        # bounce isn't a reply
+    assert by["natalief@adobe.com"]["bounced_at"]              # ...it's a bounce
+    assert by["ooo@b.com"]["last_reply"] == ""                 # out-of-office ignored
+    assert not by["ooo@b.com"].get("bounced_at")
+    assert by["real@c.com"]["last_reply"] == "2026-11-02T19:00:00Z"
+
+
+def test_classify_messages():
+    import read_replies
+    c = read_replies.classify
+    assert c({"From": "Mail Delivery Subsystem <mailer-daemon@googlemail.com>"}) == "bounce"
+    assert c({"From": "postmaster@adobe.com", "Subject": "Undeliverable: hi"}) == "bounce"
+    assert c({"From": "x@y.com", "Subject": "Delivery Status Notification (Failure)"}) == "bounce"
+    assert c({"From": "x@y.com", "Subject": "hi"},
+             "Address not found: your message wasn't delivered") == "bounce"
+    assert c({"From": "a@b.com", "Subject": "Out of Office: Coffee Chat"}) == "auto"
+    assert c({"From": "a@b.com", "Subject": "Re: hi", "Auto-Submitted": "auto-replied"}) == "auto"
+    assert c({"From": "a@b.com", "Subject": "Re: hi"},
+             "Thanks for reaching out. I'm currently out of the office until Monday.") == "auto"
+    assert c({"From": "a@b.com", "Subject": "Re: Coffee Chat Request"},
+             "Sure! That role does not exist on my team, but happy to chat.") == "reply"
+    assert c({"From": "a@b.com", "Subject": "Re: hi", "Auto-Submitted": "no"}) == "reply"
+
+
 def test_setup_scaffolds_config_at_requested_path(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OUTREACH_SECRET_BACKEND", "env")  # avoid macOS `security` call
     cfg_path = tmp_path / "sub" / "config.toml"
@@ -242,3 +313,14 @@ def test_setup_handles_template_versions_and_resume_link(tmp_path, capsys):
     assert "Template [coffee_chat]: OK t1.txt" in out and "OK t2.txt" in out
     assert "Resume link: OK https://drive.example/cv" in out
     assert "Resume file" not in out  # no template attaches a file
+
+
+def test_one_bounce_does_not_pause_two_do(tmp_path):
+    sent_log = tmp_path / "sent.csv"
+    rows = [{"contact_email": f"p{i}@x.com", "company": "X"} for i in range(19)]
+    common.write_db(str(sent_log), ["contact_email", "company"], rows)
+    cfg = _backfill_cfg(tmp_path, sent_log)
+    outreach_cli.apply_bounces(cfg, str(sent_log), {"p0@x.com"})        # 1 of 19 = 5%
+    assert not common.load_state(cfg).get("paused_until")
+    outreach_cli.apply_bounces(cfg, str(sent_log), {"p0@x.com", "p1@x.com"})
+    assert common.load_state(cfg).get("paused_until")                    # 2 of 19

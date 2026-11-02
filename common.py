@@ -68,6 +68,7 @@ DEFAULT_DAILY = {"coffee_chat": 6, "referral": 8}
 # for pause_days and steps down one level.
 DEFAULT_RAMP = {"enabled": True, "steps": [[13, 3], [18, 7], [25, 7], [35, 0]],
                 "pause_days": 2, "bounce_limit_percent": 3, "bounce_window": 50,
+                "bounce_min_count": 2,
                 "spam_check_every_days": 3}
 # One follow-up to people who haven't replied after this many business days.
 DEFAULT_FOLLOWUP = {"enabled": True, "after_business_days": 3}
@@ -216,6 +217,7 @@ steps = [[13, 3], [18, 7], [25, 7], [35, 0]]   # [emails per day, days]; 0 days 
 pause_days = 2
 bounce_limit_percent = 3
 bounce_window = 50           # bounce rate over your last 50 emails
+bounce_min_count = 2         # ...and at least this many bounces (1 in 19 isn't a trend)
 spam_check_every_days = 3    # remind you to run a spam check this often
 
 # One follow-up (in the same email thread, using templates/followup.txt) to people
@@ -351,7 +353,7 @@ def template_paths(cfg):
     paths = []
     for v in (cfg.get("templates") or {}).values():
         paths += v if isinstance(v, list) else [v]
-    return paths or [cfg["files"]["template"]]
+    return paths or [p for p in [(cfg.get("files") or {}).get("template")] if p]
 
 
 def template_for(row, cfg):

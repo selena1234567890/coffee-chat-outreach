@@ -418,11 +418,29 @@ def bounce_rate(sent_rows, window):
     return sum(bool((r.get("bounced_at") or "").strip()) for r in firsts) / len(firsts)
 
 
+def apply_bounces(cfg, sent_log, bounced):
+    """Stamp new bounces on the sent log; too many recent bounces is a warning sign
+    (pause + one ramp step down). Returns how many bounces are new."""
+    ramp_cfg = {**common.DEFAULT_RAMP, **(cfg.get("ramp") or {})}
+    new = mark_bounces(sent_log, bounced)
+    firsts = [r for r in _safe_rows(sent_log)[1] if not _is_followup(r)]
+    rate = bounce_rate(firsts, ramp_cfg["bounce_window"])
+    count = sum(bool((r.get("bounced_at") or "").strip())
+                for r in firsts[-ramp_cfg["bounce_window"]:])
+    print(f"Bounces: {new} new; {count} = {rate:.0%} of your last "
+          f"{ramp_cfg['bounce_window']} emails (pause at over "
+          f"{ramp_cfg['bounce_limit_percent']}% and {ramp_cfg['bounce_min_count']}+ bounces).")
+    if new and count >= ramp_cfg["bounce_min_count"] \
+            and rate * 100 > ramp_cfg["bounce_limit_percent"]:
+        resume = common.record_warning(cfg, f"bounce rate {rate:.0%}")
+        print(f"  Too many bounces: pausing until {resume}, one ramp step down.")
+    return new
+
+
 def cmd_health(args, cfg):
     """Check sending health: bounces (from Gmail), spam checks, ramp step, pauses.
     A warning sign pauses sending for [ramp].pause_days and steps down the ramp."""
     _, _, sent_log = _paths(cfg)
-    ramp_cfg = {**common.DEFAULT_RAMP, **(cfg.get("ramp") or {})}
 
     if args.spam_check:
         state = common.load_state(cfg)
@@ -446,13 +464,7 @@ def cmd_health(args, cfg):
             bounced = read_replies.find_bounces(imap, contacts)
         finally:
             imap.logout()
-        new = mark_bounces(sent_log, bounced)
-        rate = bounce_rate(_safe_rows(sent_log)[1], ramp_cfg["bounce_window"])
-        print(f"Bounces: {new} new; {rate:.0%} of your last {ramp_cfg['bounce_window']} "
-              f"emails (limit {ramp_cfg['bounce_limit_percent']}%).")
-        if new and rate * 100 > ramp_cfg["bounce_limit_percent"]:
-            resume = common.record_warning(cfg, f"bounce rate {rate:.0%}")
-            print(f"  Too many bounces: pausing until {resume}, one ramp step down.")
+        apply_bounces(cfg, sent_log, bounced)
 
     _print_health(cfg, _safe_rows(sent_log)[1])
 
@@ -766,7 +778,7 @@ def cmd_backfill_dates(args, cfg):
         raise SystemExit("ERROR: set [email].address in config.toml first.")
 
     our_addr = em["address"]
-    sent_found, reply_found, thread_only = {}, {}, 0
+    sent_found, reply_found, bounced, thread_only = {}, {}, set(), 0
     meta = {}  # addr -> [message_ids] of mail we sent them (for thread matching)
     imap = common.imap_login(our_addr, common.get_password(em["keychain_service"]),
                              readonly=True, host=em["imap_host"], mailbox=read_replies.SENT_MAIL)
@@ -789,7 +801,10 @@ def cmd_backfill_dates(args, cfg):
             if not addr:
                 continue
             by_from = read_replies.last_reply_for(imap, addr)
-            by_thread = read_replies.thread_reply_for(imap, meta.get(addr, []), our_addr)
+            by_thread, bounce = read_replies.thread_reply_for(imap, meta.get(addr, []),
+                                                              our_addr)
+            if bounce:
+                bounced.add(addr)
             latest = max([d for d in (by_from, by_thread) if d], default=None)
             if latest:
                 reply_found[addr] = latest
@@ -802,7 +817,9 @@ def cmd_backfill_dates(args, cfg):
             pass
 
     print(f"Found send dates for {len(sent_found)}; replies from {len(reply_found)} "
-          f"contact(s) ({thread_only} via thread-match / different address).")
+          f"contact(s) ({thread_only} via thread-match / different address); "
+          f"{len(bounced)} bounced. (Bounce notices and automatic replies are not "
+          f"counted as replies.)")
     if not args.apply:
         print("\nDry-run. Re-run with --apply to write into sent_log.csv.")
         return
@@ -821,12 +838,16 @@ def cmd_backfill_dates(args, cfg):
             # Never move last_reply backwards: keep the newer of existing vs found
             # (both are fixed-width UTC, so max() is chronological; "" loses to any).
             nr["last_reply"] = max(nr.get("last_reply") or "", reply_found[addr])
+        elif addr in bounced:
+            nr["last_reply"] = ""   # an earlier "reply" was this bounce notice
         new_rows.append(nr)
     common.backup(sent_log)
     common.write_db(sent_log, out_fields, new_rows)
     print(f"\nApplied -> {os.path.basename(sent_log)} "
           f"(sent_at for {len(sent_found)}, last_reply for {len(reply_found)}; "
           f"backup in .backups/).")
+    if bounced:
+        apply_bounces(cfg, sent_log, bounced)
 
 
 def apollo_contacts_to_leads(data, cfg):
@@ -1022,18 +1043,22 @@ def cmd_spot_check(args, cfg):
         return
     day = max(r["sent_at"][:10] for r in rows)
     pool = [r for r in rows if r["sent_at"][:10] == day]
-    by_name = {os.path.basename(p): p for p in common.template_paths(cfg)}
     print(f"=== Spot check: {min(args.n, len(pool))} of {len(pool)} sent on {day} ===")
     for r in random.sample(pool, min(args.n, len(pool))):
-        path = by_name.get(r.get("template_version") or "")
-        if not path:
-            print(f"\n(can't rebuild {r.get('contact_email')}: template unknown)")
-            continue
-        headers, body = common.load_template(path)
-        r = common.with_blanks(r, cfg)
-        print(f"\nTO:      {r.get('contact_email')}\n"
-              f"SUBJECT: {r.get('subject_sent') or common.render(headers['SUBJECT'], r)}\n")
-        print(common.render(body, r).strip())
+        print("\n" + rebuild_email(r, cfg))
+
+
+def rebuild_email(r, cfg):
+    """One email in full (TO, SUBJECT, body), rebuilt from its template + blanks."""
+    by_name = {os.path.basename(p): p for p in common.template_paths(cfg)}
+    path = by_name.get(r.get("template_version") or "")
+    if not path:
+        return f"(can't rebuild the email to {r.get('contact_email')}: template unknown)"
+    headers, body = common.load_template(path)
+    r = common.with_blanks(r, cfg)
+    return (f"TO:      {r.get('contact_email')}\n"
+            f"SUBJECT: {r.get('subject_sent') or common.render(headers['SUBJECT'], r)}\n\n"
+            + common.render(body, r).strip())
 
 
 DEEPLINE_CREDITS_PER_PERSON = 0.8   # measured on 2026-11-01: ~8.4 credits for 11 usable leads
@@ -1113,25 +1138,37 @@ def build_feedback(cfg, today=None, credits=None, now=None):
     if ramp["paused_until"]:
         needs.append(f"Sending is paused until {ramp['paused_until']} (a warning sign).")
     if bounced_today:
-        needs.append(f"{len(bounced_today)} bounced: "
+        needs.append(f"{len(bounced_today)} email(s) bounced (address doesn't exist; that "
+                     "person won't be emailed again): "
                      + ", ".join(r.get("contact_email", "") for r in bounced_today))
     if held:
-        needs.append(f"{len(held)} email(s) held for your OK (see the 10 am chat, or "
-                     f"`outreach held`).")
-    if queued < per_day:
-        needs.append(f"Queue is low: {queued} people left, {per_day} needed per day.")
+        needs.append(f"{len(held)} email(s) held, waiting for your review: "
+                     + ", ".join(f"{r.get('first_name')} {r.get('last_name')} "
+                                 f"({r.get('company')})" for r in held)
+                     + ". Say \"approve <name>\" or \"drop <name>\" in any Claude chat.")
+    if queued < per_day // 2:
+        needs.append(f"Only {queued} people are waiting to be emailed, and tomorrow can send "
+                     f"{per_day}. The contact finder couldn't find enough; check Deepline credits.")
     needs += credit_warnings(credits, per_day)
     stale = hiring_todo(cfg, today=today)
     if stale:
         good.append(f"Hiring check: {len(stale)} target companies still to (re)check; "
                     "the contact finder checks 15 a day.")
 
-    lines = [f"Outreach daily report, {today:%a %b %-d}", ""]
+    lines = [f"Outreach daily report, {today:%a %b %-d}", "",
+             f"SENT TODAY:                  {run.get('sent', 0) if run else 0}",
+             f"HELD, WAITING FOR YOUR REVIEW: {len(held)}",
+             f"BOUNCED TODAY (bad address): {len(bounced_today)}",
+             f"FAILED TO SEND:              {len((run or {}).get('failed') or [])}",
+             f"NEW REAL REPLIES (24 hours): {len(new_replies)}",
+             f"WAITING FOR A LATER DAY:     {queued} people (tomorrow sends up to {per_day})",
+             ""]
     lines.append("Everything's good." if not needs else "Needs you:")
     lines += [f"  - {x}" for x in needs]
     lines += ["", "Today:"] + [f"  - {x}" for x in good]
     if new_replies:
-        lines.append("  - New replies (last 24 hours): " + ", ".join(
+        lines.append("  - New real replies (last 24 hours; bounces and out-of-office "
+                     "replies not counted): " + ", ".join(
             f"{r.get('first_name')} {r.get('last_name')} ({r.get('company')})"
             for r in new_replies))
     else:
@@ -1141,8 +1178,21 @@ def build_feedback(cfg, today=None, credits=None, now=None):
               f"REFERRAL SUCCESS RATE:  {referrals} referrals / {n} emailed = "
               f"{_rate(referrals, n).strip()}",
               f"People who replied so far: {len(replied)}",
-              "", f"Ramp: {per_day}/day (step {ramp['step'] + 1}).  Queue: {queued} people.",
+              "", f"Ramp: up to {per_day} emails/day (step {ramp['step'] + 1} of 4).",
               "", "Got a referral or a coffee chat? Tell Claude, and it will be recorded."]
+    if held:
+        lines += ["", "=" * 60, f"EMAILS WAITING FOR YOUR REVIEW ({len(held)})", "=" * 60,
+                  "These were NOT sent. The safety checks stopped them for the reason shown.",
+                  "Read each one, then tell Claude in any chat, e.g. \"approve Ao Xu\" (it goes",
+                  "out with the next batch exactly as shown) or \"drop Ao Xu\" (never sent)."]
+        for i, r in enumerate(held, 1):
+            lines += ["", f"--- {i}. {r.get('first_name')} {r.get('last_name')}, "
+                          f"{r.get('title') or 'title unknown'} at {r.get('company')} ---",
+                      "Why held:"]
+            lines += [f"  - {x}" for x in (r.get("held_reason") or "").split("; ") if x]
+            if (r.get("personal_source") or "").strip():
+                lines.append(f"Source of the personal line: {r.get('personal_source')}")
+            lines += ["", rebuild_email(r, cfg)]
     subject = (f"Outreach {today:%b %-d}: all good" if not needs
                else f"Outreach {today:%b %-d}: {len(needs)} thing(s) need you")
     return subject, "\n".join(lines) + "\n"

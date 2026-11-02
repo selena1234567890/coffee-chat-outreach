@@ -91,6 +91,7 @@ steps = [[13, 3], [18, 7], [25, 7], [35, 0]]   # [emails per day, days]; 0 days 
 pause_days = 2
 bounce_limit_percent = 3
 bounce_window = 50           # bounce rate over your last 50 emails
+bounce_min_count = 2         # ...and at least this many bounces (1 in 19 isn't a trend)
 spam_check_every_days = 3    # remind you to run a spam check this often
 
 # One follow-up (in the same email thread, using templates/followup.txt) to people
