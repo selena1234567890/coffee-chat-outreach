@@ -51,6 +51,7 @@ DEFAULT_FILES = {
     "covered_companies": "data/covered_companies.csv",
     "send_state": "data/send_state.json",
     "held": "data/held.csv",
+    "open_roles": "data/open_roles.csv",
 }
 DEFAULT_PACING = {"batch_size": 14, "followup_after_days": 6}
 # Most people to contact per company, by company size (employee count).
@@ -487,9 +488,38 @@ def too_small(row, cfg):
     return size is not None and size < lim["min_employees"]
 
 
-def has_open_roles(row):
-    """True if the `open_intern_roles` column says yes."""
-    return (row.get("open_intern_roles") or "").strip().lower() in {"yes", "y", "true", "1"}
+YES = {"yes", "y", "true", "1"}
+OPEN_ROLES_FIELDS = ["company", "domain", "hiring", "role", "link", "checked"]
+
+
+@functools.lru_cache(maxsize=None)
+def load_open_roles(path):
+    """Map company key and domain -> True/False, from data/open_roles.csv (one row per
+    company: is it hiring a Data/ML/AI intern right now? Filled by the contact finder)."""
+    out = {}
+    for r in _csv_rows(path):
+        hiring = (r.get("hiring") or "").strip().lower()
+        if not hiring:
+            continue
+        for key in (_company_key(r.get("company")), main_domain(r.get("domain"))):
+            if key:
+                out[key] = hiring in YES
+    return out
+
+
+def has_open_roles(row, cfg=None):
+    """True if the person's company is hiring a Data/ML/AI intern: data/open_roles.csv
+    first (by company name, then email domain), else the row's `open_intern_roles`."""
+    if cfg:
+        hiring = load_open_roles((cfg.get("files") or {}).get("open_roles"))
+        company = _company_key(row.get("company"))
+        for key in (company, main_domain(email_domain(row.get("contact_email")))):
+            if key and key in hiring:
+                return hiring[key]
+        for key, value in hiring.items():  # "publix super markets" ~ "publix"
+            if company and (company.startswith(key + " ") or key.startswith(company + " ")):
+                return value
+    return (row.get("open_intern_roles") or "").strip().lower() in YES
 
 
 @functools.lru_cache(maxsize=None)

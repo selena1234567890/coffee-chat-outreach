@@ -202,8 +202,10 @@ def cmd_stage(args, cfg):
     1. remove anyone already sent or staged (by email), or on the do-not-contact list
     2. skip companies under [company_limits].min_employees
     3. fill a blank `type` ([routing]), `tier` (target list) and surname tags
-    4. order: tier (1 first) -> open intern roles first -> priority groups -> queue order;
-       each tier gets its [tier_share] of the day first, leftover slots go to the best rest
+    4. order: data/ML/AI job -> company hiring interns (data/open_roles.csv) -> tier
+       (1 first) -> priority groups -> queue order. Hiring companies fill the day first
+       (each tier its [tier_share], then any tier), then other data/ML/AI people (tier
+       shares again), then leftover slots go to the best rest
     5. at most company_limit people per company ([company_limits], by size)
     6. at most [daily] emails per type today (counting staged + sent today)
     7. at most N in total (-n, default [pacing].batch_size)
@@ -267,22 +269,29 @@ def cmd_stage(args, cfg):
 
     def rank(pair):
         r = pair[1]
-        return (not common.relevant_role(r, cfg), int(r["tier"]), not common.has_open_roles(r),
-                -common.priority_score(r, cfg))
+        return (not common.relevant_role(r, cfg), not common.has_open_roles(r, cfg),
+                int(r["tier"]), -common.priority_score(r, cfg))
 
     # Best first; sorted() is stable, so ties keep queue order.
     ranked = sorted(((r, prepared(r)) for r in q_rows), key=rank)
     to_move, gone, why = [], set(), {}
     dropped, blocked = 0, []
-    # Pass 1 fills each tier up to its share of the day ([tier_share]). When today has
-    # room for every tier's share, the smallest tiers go first so a big tier can't use
-    # up a type's daily limit before they get theirs; otherwise best first. Pass 2
-    # gives slots a tier couldn't use to the best people left, any tier.
+    # Passes, best people first: (1) data/ML/AI people at companies hiring interns, each
+    # tier up to its share of the day ([tier_share]); (2) the same people, any tier;
+    # (3) other data/ML/AI people, tier shares; (4) leftover slots to the best rest.
+    # In a share pass, when today has room for every tier's share, the smallest tiers go
+    # first so a big tier can't use up a type's daily limit before they get theirs.
     if n >= sum(max(0, c - used_tier[t]) for t, c in tier_cap.items()):
-        first_pass = sorted(ranked, key=lambda pair: -int(pair[1]["tier"]))
+        by_tier = sorted(ranked, key=lambda pair: -int(pair[1]["tier"]))
     else:
-        first_pass = ranked
-    for by_share, order in ((True, first_pass), (False, ranked)):
+        by_tier = ranked
+    hiring = [p for p in ranked if common.relevant_role(p[1], cfg)
+              and common.has_open_roles(p[1], cfg)]
+    relevant = [p for p in by_tier if common.relevant_role(p[1], cfg)]
+    hiring_ids = {id(p[0]) for p in hiring}
+    hiring_by_tier = [p for p in by_tier if id(p[0]) in hiring_ids]
+    for by_share, order in ((True, hiring_by_tier), (False, hiring), (True, relevant),
+                            (False, ranked)):
         for orig, r in order:
             if id(orig) in gone:
                 continue
@@ -302,8 +311,6 @@ def cmd_stage(args, cfg):
                 why[id(orig)] = "type"       # today's limit for this type -> stays
             elif len(to_move) >= n:
                 why[id(orig)] = "full"       # today's batch is full -> stays
-            elif by_share and not common.relevant_role(r, cfg):
-                why[id(orig)] = "role"       # not a data/ML/AI job: only leftover slots
             elif by_share and used_tier[tier] >= tier_cap.get(tier, 0):
                 why[id(orig)] = "tier"       # tier's share used; may still get a pass-2 slot
             else:
@@ -313,6 +320,9 @@ def cmd_stage(args, cfg):
                 per_company[_company(r)] += 1
                 used_today[kind] += 1
                 used_tier[tier] += 1
+    for orig, r in ranked:                         # not a data/ML/AI job: leftover only
+        if why.get(id(orig)) == "full" and not common.relevant_role(r, cfg):
+            why[id(orig)] = "role"
     to_move.sort(key=lambda r: rank((None, r)))  # back to priority order
     waiting = collections.Counter(w for k, w in why.items() if k not in gone)
     leftover = [r for r in q_rows if id(r) not in gone]  # original order, unchanged
@@ -343,7 +353,7 @@ def cmd_stage(args, cfg):
         groups = common.priority_groups(r, cfg)
         star = f"  * {', '.join(groups)}" if groups else ""
         tier = "T?" if int(r["tier"]) == common.UNKNOWN_TIER else f"T{r['tier']}"
-        roles = " open-roles" if common.has_open_roles(r) else ""
+        roles = " hiring" if common.has_open_roles(r, cfg) else ""
         print(f"  + {tier} [{r['type']}] {r.get('company')} <{r.get('contact_email')}>"
               f"{roles}{star}")
     for r in blocked:
@@ -529,7 +539,8 @@ def person_results(sent_rows, cfg):
                 "priority": common.priority_groups(first, cfg) or ["none"],
                 "source": [(first.get("source") or "").strip() or "unknown"],
                 "personal line": [line],
-                "open intern roles": ["yes" if common.has_open_roles(first) else "no/unknown"],
+                "open intern roles": ["yes" if common.has_open_roles(first, cfg)
+                                      else "no/unknown"],
             },
         })
     return out
@@ -1093,7 +1104,10 @@ def build_feedback(cfg, today=None, credits=None, now=None):
         needs.append("SAFETY STOP: nothing was sent. Problems: "
                      + "; ".join(run.get("problems") or ["see the 10 am chat"]))
     else:
-        good.append(f"Sent {run.get('sent', 0)} email(s).")
+        sent_today = [r for r in sent_rows if _sent_today(r) and not _is_followup(r)]
+        hiring = sum(common.has_open_roles(r, cfg) for r in sent_today)
+        good.append(f"Sent {run.get('sent', 0)} email(s)"
+                    + (f", {hiring} to companies hiring interns." if sent_today else "."))
         if run.get("failed"):
             needs.append(f"{len(run['failed'])} failed to send: " + ", ".join(run["failed"]))
     if ramp["paused_until"]:
@@ -1107,6 +1121,10 @@ def build_feedback(cfg, today=None, credits=None, now=None):
     if queued < per_day:
         needs.append(f"Queue is low: {queued} people left, {per_day} needed per day.")
     needs += credit_warnings(credits, per_day)
+    stale = hiring_todo(cfg, today=today)
+    if stale:
+        good.append(f"Hiring check: {len(stale)} target companies still to (re)check; "
+                    "the contact finder checks 15 a day.")
 
     lines = [f"Outreach daily report, {today:%a %b %-d}", ""]
     lines.append("Everything's good." if not needs else "Needs you:")
@@ -1237,6 +1255,72 @@ def cmd_add(args, cfg):
     common.write_db(queue, fields, q_rows + added)
 
 
+HIRING_RECHECK_DAYS = 7
+
+
+def hiring_todo(cfg, today=None, limit=None):
+    """Target companies whose hiring status is missing or older than a week, companies
+    with people in the queue first, then by tier. Covered companies are left out."""
+    today = today or datetime.date.today()
+    checked = {common._company_key(r.get("company")): (r.get("checked") or "").strip()
+               for r in common._csv_rows(cfg["files"].get("open_roles"))}
+    queued = {common._company_key(r.get("company")) for r in _safe_rows(_paths(cfg)[0])[1]}
+    todo = []
+    for r in common._csv_rows(cfg["files"].get("targets")):
+        key = common._company_key(r.get("company"))
+        if not key or common.covered_company({"company": r.get("company")}, cfg):
+            continue
+        try:
+            age = (today - datetime.date.fromisoformat(checked.get(key, ""))).days
+        except ValueError:
+            age = None
+        if age is None or age >= HIRING_RECHECK_DAYS:
+            tier = int(r["tier"]) if (r.get("tier") or "").strip().isdigit() else 9
+            todo.append((key not in queued, tier, r.get("company"), r.get("domain"), age))
+    todo.sort(key=lambda t: t[:2])
+    return [(c, d, age) for _, _, c, d, age in todo][:limit]
+
+
+def cmd_hiring(args, cfg):
+    """Which companies are hiring a Data/ML/AI intern (data/open_roles.csv). People at
+    those companies are emailed first. `hiring set` records one company's status."""
+    path = cfg["files"]["open_roles"]
+    if args.action == "set":
+        if not args.company or args.status not in ("yes", "no"):
+            sys.exit("usage: outreach hiring set <company> yes|no [--link URL] [--role TITLE]")
+        if args.status == "yes" and not (args.link or "").startswith("http"):
+            sys.exit("A 'yes' needs --link: the job posting you found.")
+        fields, rows = _safe_rows(path)
+        fields = fields or common.OPEN_ROLES_FIELDS
+        key = common._company_key(args.company)
+        rows = [r for r in rows if common._company_key(r.get("company")) != key]
+        domain = args.domain or next(
+            (t.get("domain", "") for t in common._csv_rows(cfg["files"]["targets"])
+             if common._company_key(t.get("company")) == key), "")
+        rows.append({"company": args.company, "domain": domain, "hiring": args.status,
+                     "role": args.role or "", "link": args.link or "",
+                     "checked": datetime.date.today().isoformat()})
+        rows.sort(key=lambda r: (r.get("hiring") != "yes", r.get("company", "").lower()))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        common.write_db(path, fields, rows)
+        common.load_open_roles.cache_clear()
+        print(f"{args.company}: hiring = {args.status}")
+        return
+    rows = common._csv_rows(path)
+    yes = [r for r in rows if (r.get("hiring") or "").strip().lower() in common.YES]
+    print(f"Hiring a Data/ML/AI intern ({len(yes)} of {len(rows)} companies checked):")
+    for r in yes:
+        print(f"  + {r.get('company')}: {r.get('role')}  (checked {r.get('checked')})"
+              f"\n      {r.get('link')}")
+    todo = hiring_todo(cfg, limit=args.n)
+    print(f"\nTo check ({'first ' + str(args.n) if args.n else 'all'}; missing or older "
+          f"than {HIRING_RECHECK_DAYS} days, companies with people in the queue first):")
+    for company, domain, age in todo:
+        print(f"  - {company} ({domain})" + (f", last checked {age} days ago" if age else ""))
+    if not todo:
+        print("  (none)")
+
+
 COMMANDS = {
     "status": cmd_status, "setup": cmd_setup, "find": cmd_find,
     "stage": cmd_stage, "preview": cmd_preview, "replies": cmd_replies,
@@ -1246,7 +1330,7 @@ COMMANDS = {
     "health": cmd_health, "mark": cmd_mark,
     "report": cmd_report, "daily": cmd_daily,
     "approve-templates": cmd_approve_templates, "held": cmd_held, "approve": cmd_approve,
-    "spot-check": cmd_spot_check, "feedback": cmd_feedback,
+    "spot-check": cmd_spot_check, "feedback": cmd_feedback, "hiring": cmd_hiring,
 }
 
 
@@ -1290,6 +1374,14 @@ def main():
             p.add_argument("--all", action="store_true", help="every held email")
             p.add_argument("--drop", action="store_true",
                            help="remove them from the held list instead (never send)")
+        if name == "hiring":
+            p.add_argument("action", nargs="?", choices=["list", "set"], default="list")
+            p.add_argument("company", nargs="?", help="for set: the company name")
+            p.add_argument("status", nargs="?", help="for set: yes or no")
+            p.add_argument("--link", help="for set yes: the job posting link")
+            p.add_argument("--role", help="for set: the internship title")
+            p.add_argument("--domain", help="for set: company domain (default: target list)")
+            p.add_argument("-n", type=int, default=None, help="list: show this many to check")
         if name == "spot-check":
             p.add_argument("-n", type=int, default=2, help="how many (default 2)")
         if name == "backfill-dates":

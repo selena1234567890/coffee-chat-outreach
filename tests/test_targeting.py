@@ -1,5 +1,5 @@
 """Tests for targeting: company tiers (target list), the minimum company size,
-open intern roles first, and the do-not-contact list (at stage and at send).
+companies hiring interns first, and the do-not-contact list (at stage and at send).
 
 Hermetic: temp CSVs, a fake SMTP, no network or account.
 """
@@ -80,7 +80,7 @@ def test_tier_typed_in_the_row_wins(tmp_path):
 
 # --- staging order ------------------------------------------------------------
 
-def test_stage_order_tier_then_open_roles_then_priority(tmp_path):
+def test_stage_order_open_roles_then_tier_then_priority(tmp_path):
     queue = [_person("a@publix.com"),                                        # tier 3
              _person("b@unknown.io"),                                        # not listed
              _person("c@capitalone.com", school="Emory"),                    # tier 2, Emory
@@ -343,3 +343,79 @@ def test_other_roles_go_last_even_from_a_better_tier(tmp_path):
     assert [r["contact_email"] for r in left] == ["consult@google.com"]   # kept as a backup
     staged, _ = _stage(_cfg(tmp_path), queue, n=2)                         # room for both
     assert [r["contact_email"] for r in staged] == ["ds@publix.com", "consult@google.com"]
+
+
+# --- companies hiring interns first (data/open_roles.csv) ----------------------------
+
+OPEN_ROLES = ("company,domain,hiring,role,link,checked\n"
+              "Publix,publix.com,yes,Data Science Intern,https://x/1,2026-11-01\n"
+              "Google,google.com,no,,,2026-11-01\n")
+
+
+def _hiring_cfg(tmp_path):
+    cfg = _cfg(tmp_path)
+    (tmp_path / "open_roles.csv").write_text(OPEN_ROLES)
+    cfg["files"]["open_roles"] = str(tmp_path / "open_roles.csv")
+    common.load_open_roles.cache_clear()
+    return cfg
+
+
+def test_has_open_roles_from_the_hiring_list(tmp_path):
+    cfg = _hiring_cfg(tmp_path)
+    assert common.has_open_roles({"company": "Publix Super Markets Inc"}, cfg)
+    assert common.has_open_roles({"company": "", "contact_email": "a@corp.publix.com"}, cfg)
+    assert not common.has_open_roles({"company": "Google", "open_intern_roles": "yes"}, cfg)
+    assert common.has_open_roles({"company": "Meta", "open_intern_roles": "yes"}, cfg)
+    assert not common.has_open_roles({"company": "Meta"}, cfg)
+
+
+def test_hiring_beats_tier_but_not_relevance(tmp_path):
+    queue = [_person("ds@google.com", company="Google"),                       # tier 1
+             _person("ds@publix.com", company="Publix"),                       # tier 3, hiring
+             _person("hr@publix.com", company="Publix", title="HR Manager")]   # hiring, not data
+    staged, _ = _stage(_hiring_cfg(tmp_path), queue, n=1)
+    assert [r["contact_email"] for r in staged] == ["ds@publix.com"]
+    staged, _ = _stage(_hiring_cfg(tmp_path), queue)
+    assert [r["contact_email"] for r in staged] == ["ds@publix.com", "ds@google.com",
+                                                    "hr@publix.com"]
+
+
+def test_hiring_people_are_not_held_back_by_tier_share(tmp_path):
+    # Tier 3's share is 10%, but people at a hiring company still fill the day first.
+    queue = [_person(f"ds{i}@publix.com", company="Publix") for i in range(4)]
+    queue += [_person(f"ds{i}@google.com", company="Google") for i in range(4)]
+    staged, _ = _stage(_hiring_cfg(tmp_path), queue, n=4)
+    assert all(r["company"] == "Publix" for r in staged)
+
+
+def test_hiring_set_and_todo(tmp_path, capsys):
+    cfg = _cfg(tmp_path)
+    cfg["files"]["open_roles"] = str(tmp_path / "open_roles.csv")
+    common.load_open_roles.cache_clear()
+    common.write_db(cfg["files"]["queue"], FIELDS, [_person("a@publix.com", company="Publix")])
+
+    def run(*a, **kw):
+        ns = dict(action="set", company=None, status=None, link=None, role=None,
+                  domain=None, n=None)
+        ns.update(kw)
+        outreach_cli.cmd_hiring(argparse.Namespace(**ns), cfg)
+
+    todo = [c for c, _, _ in outreach_cli.hiring_todo(cfg)]
+    assert todo[0] == "Publix"                         # company with people in the queue first
+    with contextlib.suppress(SystemExit):
+        run(company="Publix", status="yes")            # a yes needs a posting link
+    assert not os.path.exists(cfg["files"]["open_roles"])
+    run(company="Publix", status="yes", link="https://jobs/1", role="DS Intern")
+    run(company="Google", status="no")
+    run(company="Google", status="yes", link="https://jobs/2")      # updated, not duplicated
+    _, rows = common.read_rows(cfg["files"]["open_roles"])
+    assert sorted((r["company"], r["hiring"], r["domain"]) for r in rows) == [
+        ("Google", "yes", "google.com"), ("Publix", "yes", "publix.com")]
+    assert common.has_open_roles({"company": "Google"}, cfg)
+    todo = [c for c, _, _ in outreach_cli.hiring_todo(cfg)]
+    assert "Publix" not in todo and "Google" not in todo and "Meta" in todo
+    old = (datetime.date.today() - datetime.timedelta(days=8)).isoformat()
+    for r in rows:
+        r["checked"] = old
+    common.write_db(cfg["files"]["open_roles"], list(rows[0]), rows)
+    assert "Google" in [c for c, _, _ in outreach_cli.hiring_todo(cfg)]   # re-check weekly

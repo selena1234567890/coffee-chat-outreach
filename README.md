@@ -53,7 +53,7 @@ Safety checks added:
 | Rule | Setting | Default |
 |---|---|---|
 | Email type, when `type` is blank | `[routing]` | `coffee_chat` if 3+ years at the company (`start_date`) or a lead / manager / director / principal / staff / head `title`; otherwise `referral` |
-| Order (who goes first) | target list, `[priority]` | **tier** (1 big tech → 2 finance/banking/consulting → 3 other big companies → not listed), then **open intern roles** (`open_intern_roles = yes`), then matching `school` (e.g. Emory) or a tag in `priority_tags` |
+| Order (who goes first) | target list, `[priority]` | **data/ML/AI job** first, then **company hiring a Data/ML/AI intern** (`data/open_roles.csv`, or `open_intern_roles = yes` on the row), then **tier** (1 big tech → 2 finance/banking/consulting → 3 other big companies → not listed), then matching `school` (e.g. Emory) or a tag in `priority_tags` |
 | Company tiers | `data/target_companies.csv` | you edit it: `company, domain, tier`; matched by company name or email domain. A `tier` typed in the row wins |
 | Smallest company | `[company_limits].min_employees` | 1,000: smaller companies are skipped (they stay in the queue) |
 | Never cold email | `data/do_not_contact.csv` | people you already know: removed at `stage` and skipped at send. Match by email, or first name (+ last name) (+ company). Private: not committed; see the `.example` |
@@ -103,6 +103,13 @@ link).
 scientist, analytics, ...) are staged last, only when nobody better is left; a referral counts most
 from someone in the same field.
 
+**Companies hiring interns next:** `data/open_roles.csv` (private) says, per company, whether it has
+an open Summer 2027 Data/ML/AI internship (role, posting link, date checked). The contact finder
+fills it every day (Round H, free web search; 15 companies a day, each re-checked weekly) with
+`outreach hiring set "<company>" yes --link <posting> --role "<title>"` (or `no`). `outreach hiring`
+lists the hiring companies and the ones still to check. Data/ML/AI people at hiring companies fill
+the day first, ahead of tier shares; the daily report says how many emails went to them.
+
 ### Safety checks before every send (`guard.py`)
 
 So emails can go out without you reading each one, `outreach-send` checks every email first.
@@ -139,7 +146,8 @@ then it stops and shows you the batch) and, only after you approve the number, *
 
 | Round | Where people come from | Cost |
 |---|---|---|
-| D | Deepline: people who studied at Emory and now hold a data/ML/AI job at a target company, plus a verified work email (`outreach from-deepline`); skips anyone whose headline says they moved | Deepline credits (~0.6 per person) |
+| H | Not people: checks careers pages for open Data/ML/AI internships (`outreach hiring`), so people at hiring companies go first | free |
+| D | Deepline (hiring companies searched first): people who studied at Emory and now hold a data/ML/AI job at a target company, plus a verified work email (`outreach from-deepline`); skips anyone whose headline says they moved | Deepline credits (~0.6 per person) |
 | 0 | People you save with the Apollo LinkedIn extension (`outreach from-apollo` picks them out) | 1 Apollo credit each, when you save |
 | W | The agent's web search: people + an email they **published themselves** (papers, personal sites, GitHub) | free |
 | 1–2 | Apollo people search + email reveal (needs a paid Apollo plan) | 1 credit per email |
