@@ -419,3 +419,13 @@ def test_hiring_set_and_todo(tmp_path, capsys):
         r["checked"] = old
     common.write_db(cfg["files"]["open_roles"], list(rows[0]), rows)
     assert "Google" in [c for c, _, _ in outreach_cli.hiring_todo(cfg)]   # re-check weekly
+
+
+def test_covered_company_matches_whole_words_only(tmp_path):
+    cfg = _cfg(tmp_path)
+    (tmp_path / "covered.csv").write_text("company,domains,note\nMcKinsey & Company,mckinsey.com,\n"
+                                          "The Home Depot,homedepot.com,\n")
+    cfg["files"]["covered_companies"] = str(tmp_path / "covered.csv")
+    assert not common.covered_company({"company": "EY", "contact_email": "p@ey.com"}, cfg)
+    assert common.covered_company({"company": "McKinsey"}, cfg)
+    assert common.covered_company({"company": "Home Depot"}, cfg)

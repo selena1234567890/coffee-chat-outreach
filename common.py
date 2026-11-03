@@ -562,7 +562,8 @@ def covered_company(row, cfg):
     company = _company_key(row.get("company"))
     domain = email_domain(row.get("contact_email"))
     for name, domains in _covered_list((cfg.get("files") or {}).get("covered_companies")):
-        if company and name and (name in company or company in name):
+        # Whole words only, so "EY" isn't matched inside "McKinsey".
+        if company and name and (f" {name} " in f" {company} " or f" {company} " in f" {name} "):
             return True
         if domain and any(domain == d or domain.endswith("." + d) for d in domains):
             return True
