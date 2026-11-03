@@ -179,6 +179,10 @@ def due_followups(sent_rows, db_rows, cfg, today=None):
     today = today or datetime.date.today()
     done = {common.normalize_email(r.get("contact_email"))
             for r in sent_rows + db_rows if _is_followup(r)}
+    # Per person, not per row: someone emailed twice by mistake who answered (or
+    # bounced) on either copy gets no follow-up.
+    done |= {common.normalize_email(r.get("contact_email")) for r in sent_rows
+             if (r.get("last_reply") or "").strip() or (r.get("bounced_at") or "").strip()}
     out = []
     for r in sent_rows:
         email = common.normalize_email(r.get("contact_email"))
@@ -1301,7 +1305,8 @@ def check_lead(r, cfg, known_emails):
         return common.skip_reason(r, cfg)
     company_domain = common.main_domain(r.get("company_domain"))
     email_dom = common.main_domain(common.email_domain(r.get("contact_email")))
-    if company_domain and status != common.PUBLIC and email_dom != company_domain:
+    if (company_domain and status != common.PUBLIC and email_dom != company_domain
+            and email_dom != common.target_email_domain(r.get("company"), cfg)):
         return f"email is at {email_dom}, not their current company ({company_domain})"
     if common.too_small(r, cfg):
         return "company under min_employees"

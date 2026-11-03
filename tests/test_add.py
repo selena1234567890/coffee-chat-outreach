@@ -210,3 +210,15 @@ def test_email_at_a_different_company_is_rejected(tmp_path, capsys):
     ])
     assert [r["contact_email"] for r in rows] == ["ok@mail.google.com", "p@walmart.com"]
     assert "email is at meta.com, not their current company (snap.com)" in capsys.readouterr().out
+
+
+def test_email_domain_from_the_target_list_is_accepted(tmp_path, capsys):
+    cfg = _cfg(tmp_path)
+    targets = tmp_path / "targets.csv"
+    targets.write_text("company,domain,tier,notes\nBank of America,bofa.com,2,\n")
+    cfg["files"]["targets"] = str(targets)
+    rows = _add(tmp_path, cfg, [
+        _lead("s@bofa.com", company="Bank of America", company_domain="bankofamerica.com"),
+        _lead("x@citi.com", company="Bank of America", company_domain="bankofamerica.com"),
+    ])
+    assert [r["contact_email"] for r in rows] == ["s@bofa.com"]

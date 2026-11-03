@@ -440,6 +440,16 @@ def load_targets(path):
     return out
 
 
+def target_email_domain(company, cfg):
+    """The domain listed for this company in target_companies.csv (its email domain,
+    e.g. bofa.com for Bank of America, whose website is bankofamerica.com), or ""."""
+    key = _company_key(company)
+    for r in _csv_rows((cfg.get("files") or {}).get("targets")):
+        if key and _company_key(r.get("company")) == key:
+            return main_domain(r.get("domain"))
+    return ""
+
+
 def company_tier(row, cfg):
     """1 = big tech, 2 = finance/banking/consulting, 3 = other big companies.
 

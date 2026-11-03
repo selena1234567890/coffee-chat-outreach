@@ -411,3 +411,12 @@ def test_followups_wait_when_the_reply_check_did_not_finish(tmp_path, capsys):
     staged = common.read_rows(cfg["files"]["database"])[1]
     assert [r["contact_email"] for r in staged] == ["new@a.com"]
     assert "Follow-ups skipped today" in capsys.readouterr().out
+
+
+def test_no_followup_when_either_copy_of_a_double_send_got_a_reply(tmp_path):
+    cfg = _stage_cfg(tmp_path)
+    first = _sent("twice@a.com", 10)
+    second = {**_sent("twice@a.com", 10), "message_id": "<twice.2@gmail.com>",
+              "last_reply": _utc(TODAY)}
+    assert outreach_cli.due_followups([first, second], [], cfg, today=TODAY) == []
+    assert len(outreach_cli.due_followups([first], [], cfg, today=TODAY)) == 1
