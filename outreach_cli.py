@@ -423,10 +423,13 @@ def apply_bounces(cfg, sent_log, bounced):
     (pause + one ramp step down). Returns how many bounces are new."""
     ramp_cfg = {**common.DEFAULT_RAMP, **(cfg.get("ramp") or {})}
     new = mark_bounces(sent_log, bounced)
-    firsts = [r for r in _safe_rows(sent_log)[1] if not _is_followup(r)]
-    rate = bounce_rate(firsts, ramp_cfg["bounce_window"])
+    window = [r for r in _safe_rows(sent_log)[1]
+              if not _is_followup(r)][-ramp_cfg["bounce_window"]:]
+    # Bounces at a company you've since blocked (data/covered_companies.csv) don't
+    # count: the cause is known and nobody there is emailed again.
     count = sum(bool((r.get("bounced_at") or "").strip())
-                for r in firsts[-ramp_cfg["bounce_window"]:])
+                and not common.covered_company(r, cfg) for r in window)
+    rate = count / len(window) if window else 0.0
     print(f"Bounces: {new} new; {count} = {rate:.0%} of your last "
           f"{ramp_cfg['bounce_window']} emails (pause at over "
           f"{ramp_cfg['bounce_limit_percent']}% and {ramp_cfg['bounce_min_count']}+ bounces).")

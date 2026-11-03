@@ -324,3 +324,18 @@ def test_one_bounce_does_not_pause_two_do(tmp_path):
     assert not common.load_state(cfg).get("paused_until")
     outreach_cli.apply_bounces(cfg, str(sent_log), {"p0@x.com", "p1@x.com"})
     assert common.load_state(cfg).get("paused_until")                    # 2 of 19
+
+
+def test_bounces_at_blocked_companies_do_not_pause(tmp_path):
+    sent_log = tmp_path / "sent.csv"
+    rows = [{"contact_email": f"p{i}@x.com", "company": "X"} for i in range(19)]
+    rows += [{"contact_email": "a@adobe.com", "company": "Adobe"},
+             {"contact_email": "b@adobe.com", "company": "Adobe"}]
+    common.write_db(str(sent_log), ["contact_email", "company"], rows)
+    cfg = _backfill_cfg(tmp_path, sent_log)
+    (tmp_path / "covered.csv").write_text("company,domains,note\nAdobe,adobe.com,blocked\n")
+    cfg["files"]["covered_companies"] = str(tmp_path / "covered.csv")
+    outreach_cli.apply_bounces(cfg, str(sent_log), {"a@adobe.com", "b@adobe.com"})
+    assert not common.load_state(cfg).get("paused_until")
+    outreach_cli.apply_bounces(cfg, str(sent_log), {"p0@x.com", "p1@x.com"})
+    assert common.load_state(cfg).get("paused_until")
