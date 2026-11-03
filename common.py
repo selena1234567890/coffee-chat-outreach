@@ -720,11 +720,12 @@ def first_send_date(sent_rows):
     return min(dates) if dates else None
 
 
-def ramp_status(cfg, first_send=None, today=None):
+def ramp_status(cfg, first_send=None, today=None, save=True):
     """Today's email limit from the ramp: {per_day, step, step_started, paused_until}.
 
     The ramp starts on your first real send. per_day is 0 while paused. Moving up a
-    step is saved to the state file.
+    step is saved to the state file; pass save=False to look at another day (what
+    will the limit be next week?) without moving the real ramp forward.
     """
     ramp = {**DEFAULT_RAMP, **(cfg.get("ramp") or {})}
     steps = ramp["steps"]
@@ -744,8 +745,8 @@ def ramp_status(cfg, first_send=None, today=None):
             and (today - started).days >= steps[step][1]:
         started += datetime.timedelta(days=steps[step][1])
         step += 1
-    if (step, started.isoformat()) != (state.get("step"), state.get("step_started")) \
-            or "step" not in state:
+    if save and ((step, started.isoformat()) != (state.get("step"), state.get("step_started"))
+                 or "step" not in state):
         state.update(step=step, step_started=started.isoformat())
         save_state(cfg, state)
     return {"per_day": steps[step][0], "step": step, "step_started": started,

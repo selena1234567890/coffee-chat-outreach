@@ -347,3 +347,13 @@ def test_no_link_text_means_plain_email_only(monkeypatch, tmp_path):
                                                                type="referral")]),
                     "--send", "--yes")
     assert fake.sent[0].get_body(preferencelist=("html",)) is None
+
+
+def test_looking_at_a_future_date_does_not_move_the_ramp(tmp_path):
+    cfg = {"files": {"send_state": str(tmp_path / "state.json")}}
+    today = datetime.date.today()
+    common.save_state(cfg, {"step": 0, "step_started": today.isoformat()})
+    future = common.ramp_status(cfg, first_send=today, today=today + datetime.timedelta(days=30),
+                                save=False)
+    assert future["step"] > 0
+    assert common.load_state(cfg)["step"] == 0
