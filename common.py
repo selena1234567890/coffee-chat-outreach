@@ -941,9 +941,12 @@ def smtp_session(host, port, username, password):
         yield smtp
 
 
+IMAP_TIMEOUT = 60  # seconds; a silent Gmail raises an error instead of hanging forever
+
+
 def imap_login(username, password, readonly=True, host=IMAP_HOST, mailbox=ALL_MAIL):
     """Log into Gmail over IMAP and select a mailbox (All Mail, INBOX fallback)."""
-    imap = imaplib.IMAP4_SSL(host)
+    imap = imaplib.IMAP4_SSL(host, timeout=IMAP_TIMEOUT)
     imap.login(username, password)
     typ, _ = imap.select(mailbox, readonly=readonly)
     if typ != "OK":  # All Mail label may be localized/renamed

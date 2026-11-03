@@ -59,3 +59,4 @@ data/approved_templates.json
 
 # Which companies are hiring interns (your target list's working notes)
 data/open_roles.csv
+.send.lock

@@ -33,6 +33,7 @@ def _feedback(cfg, credits=CREDITS):
 def test_all_good_day(tmp_path):
     rows = [_sent("a@g.com", last_reply="2026-11-02T15:00:00Z", first_name="Ann"),
             _sent("b@g.com", outcome="referral_given", last_reply="2026-10-30T10:00:00Z")]
+    rows += [_sent(f"c{i}@g.com") for i in range(11)]          # 13 sent today = the target
     subject, text = _feedback(_setup(tmp_path, rows, run={"sent": 13, "failed": [], "held": 0}))
     assert subject == "Outreach Nov 2: all good"
     assert "Everything's good." in text and "Needs you" not in text
@@ -41,8 +42,16 @@ def test_all_good_day(tmp_path):
     assert "HELD, WAITING FOR YOUR REVIEW: 0" in text
     assert "NEW REAL REPLIES (24 hours): 1" in text
     assert "not counted): Ann Lee (Google)" in text
-    assert "RESPONSE RATE:          2 replied / 2 emailed = 100%" in text
-    assert "REFERRAL SUCCESS RATE:  1 referrals / 2 emailed = 50%" in text
+    assert "TODAY'S TARGET:              13" in text
+    assert "RESPONSE RATE:          2 replied / 13 emailed = 15%" in text
+    assert "REFERRAL SUCCESS RATE:  1 referrals / 13 emailed = 8%" in text
+
+
+def test_short_of_the_target_is_explained(tmp_path):
+    rows = [_sent(f"a{i}@g.com") for i in range(10)]
+    _, text = _feedback(_setup(tmp_path, rows, run={"sent": 10, "failed": [], "held": 0}))
+    assert "SENT TODAY:                  10" in text
+    assert "3 short of today's target of 13" in text
 
 
 def test_problems_are_listed(tmp_path):

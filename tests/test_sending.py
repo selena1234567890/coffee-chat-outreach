@@ -357,3 +357,57 @@ def test_looking_at_a_future_date_does_not_move_the_ramp(tmp_path):
                                 save=False)
     assert future["step"] > 0
     assert common.load_state(cfg)["step"] == 0
+
+
+# --- never two sends at once / never the same person twice ------------------------
+
+def test_second_send_run_is_blocked_while_one_runs(monkeypatch, tmp_path):
+    import fcntl
+    cfg_path = _workspace(tmp_path, [_person("p1@corp.com", type="referral")])
+    with open(tmp_path / send.LOCK_NAME, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)   # another run is sending
+        with pytest.raises(SystemExit, match="another send is already running"):
+            _send(monkeypatch, cfg_path, "--send", "--yes")
+    assert not (tmp_path / "sent.csv").exists()
+
+
+def test_email_sent_by_another_run_mid_batch_is_skipped(monkeypatch, tmp_path):
+    rows = [_person(f"p{i}@corp.com", type="referral") for i in range(3)]
+    cfg_path = _workspace(tmp_path, rows)
+    log = str(tmp_path / "sent.csv")
+
+    def other_run_sends_p1(_seconds):  # during the wait, another run emails p1
+        common.archive(log, common.SENT_LOG_FIELDS, [{**rows[1], "sent_at": _utc(TODAY)}])
+
+    monkeypatch.setattr(send, "wait_between_emails", other_run_sends_p1)
+    fake, _ = _send(monkeypatch, cfg_path, "--send", "--yes")
+    assert [m["To"] for m in fake.sent] == ["p0@corp.com", "p2@corp.com"]
+    assert common.read_rows(str(tmp_path / "db.csv"))[1] == []
+
+
+# --- the day's total is met --------------------------------------------------------
+
+def test_unused_type_slots_fill_the_day(tmp_path):
+    juniors = [_person(f"j{i}@a.com") for i in range(20)]   # referrals only, no coffee chats
+    staged = _stage(_stage_cfg(tmp_path), juniors)
+    assert len(staged) == 13 and {r["type"] for r in staged} == {"referral"}
+
+
+def test_slow_gmail_does_not_hold_up_the_day(monkeypatch, tmp_path):
+    import threading
+    stop = threading.Event()
+    monkeypatch.setattr(outreach_cli, "cmd_backfill_dates", lambda *a: stop.wait(5))
+    assert outreach_cli.check_replies_in_background({}, wait=0.05) is False
+    stop.set()
+
+
+def test_followups_wait_when_the_reply_check_did_not_finish(tmp_path, capsys):
+    cfg = _stage_cfg(tmp_path)
+    old = _sent("old@a.com", 10)
+    common.write_db(cfg["files"]["queue"], FIELDS, [_person("new@a.com")])
+    common.write_db(cfg["files"]["database"], FIELDS, [])
+    common.write_db(cfg["files"]["sent_log"], list(dict.fromkeys(FIELDS + list(old))), [old])
+    outreach_cli.cmd_stage(argparse.Namespace(n=None, no_followups=True), cfg)
+    staged = common.read_rows(cfg["files"]["database"])[1]
+    assert [r["contact_email"] for r in staged] == ["new@a.com"]
+    assert "Follow-ups skipped today" in capsys.readouterr().out

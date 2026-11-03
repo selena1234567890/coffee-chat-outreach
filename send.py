@@ -28,7 +28,9 @@ One-time Keychain setup (stores the Gmail APP password, encrypted, not on disk):
   security add-generic-password -s mailmerge-gmail -a "$USER" -w
 """
 import argparse
+import contextlib
 import datetime
+import fcntl
 import html
 import mimetypes
 import os
@@ -42,6 +44,35 @@ import common
 import guard
 
 TEST_COUNT = 2  # how many emails --test sends to yourself
+LOCK_NAME = ".send.lock"  # in the workspace; only one real send may run at a time
+
+
+@contextlib.contextmanager
+def send_lock(workspace):
+    """Hold an exclusive lock while sending, so two runs (say the 10 am task and a
+    manual send) can never email the same batch twice. Exits if one already runs."""
+    with open(os.path.join(workspace, LOCK_NAME), "w") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit("ERROR: another send is already running. Nothing sent; "
+                     "wait for it to finish.")
+        yield
+
+
+def already_sent(r, log_path):
+    """True if this row's email already went out (re-read the sent log right before
+    each send, in case another run sent it since this batch was read)."""
+    if not os.path.exists(log_path):
+        return False
+    em = common.normalize_email(r.get("contact_email"))
+    followup = (r.get("type") or "").strip().lower() == "followup"
+    for x in common.read_rows(log_path)[1]:
+        if common.normalize_email(x.get("contact_email")) != em:
+            continue
+        if not followup or (x.get("type") or "").strip().lower() == "followup":
+            return True
+    return False
 
 
 def build_message(row, headers, body, base_dir):
@@ -111,6 +142,24 @@ def send_test(cfg, plan, workspace, to=None):
 
 
 def main():
+    if "--send" in sys.argv[1:]:
+        cfg = common.load_config(common.find_config(_config_arg()))
+        with send_lock(cfg["workspace"]):
+            return _main()
+    return _main()
+
+
+def _config_arg():
+    args = sys.argv[1:]
+    for i, a in enumerate(args):
+        if a == "--config" and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("--config="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", help="config path (default ./config.toml or $OUTREACH_CONFIG)")
     ap.add_argument("--send", action="store_true", help="actually send (default: dry-run)")
@@ -298,6 +347,11 @@ def main():
         for i, (r, headers, body) in enumerate(plan):
             if i:
                 wait_between_emails(cfg)
+            if already_sent(r, LOG):
+                print(f"  skipped -> {r['contact_email']}: already in the sent log")
+                remaining.remove(r)
+                common.write_db(DB, fieldnames, remaining, ignore_extra=True)
+                continue
             r["message_id"] = make_msgid(domain=domain)
             try:
                 msg = build_message(r, headers, body, workspace)

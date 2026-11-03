@@ -25,6 +25,7 @@ import re
 import statistics
 import subprocess
 import sys
+import threading
 
 import common
 import guard
@@ -145,14 +146,14 @@ def cmd_find(args, cfg):
     print(f"leads; append them to {os.path.basename(queue)}, then run `stage`.")
 
 
-def _sent_today(r):
+def _sent_today(r, today=None):
     """True if this sent-log row's sent_at (UTC) falls on today's local date."""
     try:
         dt = datetime.datetime.strptime((r.get("sent_at") or "").strip(), "%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
         return False
     local = dt.replace(tzinfo=datetime.timezone.utc).astimezone()
-    return local.date() == datetime.date.today()
+    return local.date() == (today or datetime.date.today())
 
 
 def _is_followup(r):
@@ -207,7 +208,8 @@ def cmd_stage(args, cfg):
        (each tier its [tier_share], then any tier), then other data/ML/AI people (tier
        shares again), then leftover slots go to the best rest
     5. at most company_limit people per company ([company_limits], by size)
-    6. at most [daily] emails per type today (counting staged + sent today)
+    6. at most [daily] emails per type today (counting staged + sent today); if the
+       ramp's day isn't full after that, the other type's unused slots are used
     7. at most N in total (-n, default [pacing].batch_size)
     People skipped by 2 and 5-7 stay in the queue (for another day, or a changed setting).
     """
@@ -219,7 +221,8 @@ def cmd_stage(args, cfg):
     firsts = [r for r in sent_rows + db_rows if not _is_followup(r)]  # first emails only
 
     daily = cfg.get("daily") or common.DEFAULT_DAILY
-    if (cfg.get("ramp") or {}).get("enabled"):
+    ramp_on = bool((cfg.get("ramp") or {}).get("enabled"))
+    if ramp_on:
         ramp = common.ramp_status(cfg, first_send=common.first_send_date(sent_rows))
         if ramp["per_day"] == 0:
             print(f"Paused after a warning sign until {ramp['paused_until']}. "
@@ -238,7 +241,12 @@ def cmd_stage(args, cfg):
         print("Nothing to do: today's limit is reached.")
         return
 
-    followups = due_followups(sent_rows, db_rows, cfg)[:n]
+    if getattr(args, "no_followups", False):
+        followups = []
+        print("Follow-ups skipped today: the Gmail reply check didn't finish, so we "
+              "can't be sure who replied. New people fill the batch instead.")
+    else:
+        followups = due_followups(sent_rows, db_rows, cfg)[:n]
     n -= len(followups)
     if not q_rows and not followups:
         print("Queue is empty (header only). Run `find` + the contact finder to refill.")
@@ -290,8 +298,11 @@ def cmd_stage(args, cfg):
     relevant = [p for p in by_tier if common.relevant_role(p[1], cfg)]
     hiring_ids = {id(p[0]) for p in hiring}
     hiring_by_tier = [p for p in by_tier if id(p[0]) in hiring_ids]
-    for by_share, order in ((True, hiring_by_tier), (False, hiring), (True, relevant),
-                            (False, ranked)):
+    # (5) if the day still isn't full, one type's unused slots go to the other type,
+    # so the day's total is met whenever there are enough people.
+    for by_share, order, any_type in ((True, hiring_by_tier, False), (False, hiring, False),
+                                      (True, relevant, False), (False, ranked, False),
+                                      (False, ranked, ramp_on)):
         for orig, r in order:
             if id(orig) in gone:
                 continue
@@ -307,7 +318,7 @@ def cmd_stage(args, cfg):
                 why[id(orig)] = "small"      # under min_employees -> stays in queue
             elif _company(r) and per_company[_company(r)] >= common.company_limit(r, cfg):
                 why[id(orig)] = "company"    # company at its limit -> stays in queue
-            elif kind in daily and used_today[kind] >= daily[kind]:
+            elif kind in daily and used_today[kind] >= daily[kind] and not any_type:
                 why[id(orig)] = "type"       # today's limit for this type -> stays
             elif len(to_move) >= n:
                 why[id(orig)] = "full"       # today's batch is full -> stays
@@ -648,6 +659,32 @@ def cmd_report(args, cfg):
     _print_health(cfg, sent_rows)
 
 
+REPLY_WAIT_SECONDS = 90  # the daily routine never waits longer than this for Gmail
+
+
+def check_replies_in_background(cfg, wait=REPLY_WAIT_SECONDS):
+    """Read replies from Gmail on a side thread and wait at most `wait` seconds.
+    Returns True if the check finished. If Gmail is slow, the routine goes on
+    without it (the thread dies when the process ends; `outreach feedback` checks
+    replies again after sending)."""
+    result = {}
+
+    def run():
+        try:
+            cmd_backfill_dates(argparse.Namespace(apply=True), cfg)
+            result["ok"] = True
+        except Exception as e:  # a Gmail error must never stop the day's sending
+            print(f"Gmail reply check failed: {e}")
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(wait)
+    if t.is_alive():
+        print(f"Gmail didn't answer within {wait}s, so today's batch goes on without "
+              f"the reply check (follow-ups wait for a day it works).")
+    return bool(result.get("ok")) and not t.is_alive()
+
+
 def cmd_daily(args, cfg):
     """The morning routine, in the right order. Never sends anything:
     1. replies + send dates from Gmail (so nobody who replied gets a follow-up)
@@ -658,21 +695,23 @@ def cmd_daily(args, cfg):
     """
     _, _, sent_log = _paths(cfg)
     has_sent = bool(_safe_rows(sent_log)[1])
+    replies_ok = not has_sent
     print("=== 1. Replies from Gmail ===")
     if args.no_imap:
         print("Skipped (--no-imap): follow-ups use the replies already in the sent log.")
     elif has_sent:
-        cmd_backfill_dates(argparse.Namespace(apply=True), cfg)
+        replies_ok = check_replies_in_background(cfg)
     else:
         print("Nothing sent yet.")
     print("\n=== 2. Health ===")
-    cmd_health(argparse.Namespace(spam_check=None, no_imap=args.no_imap or not has_sent), cfg)
+    cmd_health(argparse.Namespace(spam_check=None,
+                                  no_imap=args.no_imap or not has_sent or not replies_ok), cfg)
     _, sent_rows = _safe_rows(sent_log)
     if common.ramp_status(cfg, first_send=common.first_send_date(sent_rows))["per_day"] == 0:
         print("\nPaused, so nothing is staged today.")
         return
     print("\n=== 3. Today's batch ===")
-    cmd_stage(argparse.Namespace(n=None), cfg)
+    cmd_stage(argparse.Namespace(n=None, no_followups=not replies_ok and not args.no_imap), cfg)
     print("\n=== 4. Preview (check every >> CHECK line) ===")
     cmd_preview(argparse.Namespace(), cfg)
     print("\nNext: `outreach-send --test` (to you), read it, then "
@@ -1124,6 +1163,8 @@ def build_feedback(cfg, today=None, credits=None, now=None):
     per_day = ramp["per_day"] or common.DEFAULT_RAMP["steps"][ramp["step"]][0]
     held = _safe_rows(cfg["files"]["held"])[1]
     queued = len(_safe_rows(queue)[1])
+    sent_n = sum(_sent_today(r, today) for r in sent_rows)  # every email Gmail sent today
+    failed_n = len((run or {}).get("failed") or [])
 
     needs, good = [], []
     if not run:
@@ -1134,10 +1175,15 @@ def build_feedback(cfg, today=None, credits=None, now=None):
     else:
         sent_today = [r for r in sent_rows if _sent_today(r) and not _is_followup(r)]
         hiring = sum(common.has_open_roles(r, cfg) for r in sent_today)
-        good.append(f"Sent {run.get('sent', 0)} email(s)"
+        good.append(f"Sent {sent_n} email(s)"
                     + (f", {hiring} to companies hiring interns." if sent_today else "."))
         if run.get("failed"):
             needs.append(f"{len(run['failed'])} failed to send: " + ", ".join(run["failed"]))
+        short = per_day - sent_n - len(held) - failed_n
+        if short > 0 and not ramp["paused_until"]:
+            needs.append(f"{short} short of today's target of {per_day}: not enough people "
+                         "were ready (queue ran out, or the rest are at companies already "
+                         "at their limit). The contact finder needs to add more.")
     if ramp["paused_until"]:
         needs.append(f"Sending is paused until {ramp['paused_until']} (a warning sign).")
     if bounced_today:
@@ -1159,10 +1205,11 @@ def build_feedback(cfg, today=None, credits=None, now=None):
                     "the contact finder checks 15 a day.")
 
     lines = [f"Outreach daily report, {today:%a %b %-d}", "",
-             f"SENT TODAY:                  {run.get('sent', 0) if run else 0}",
+             f"TODAY'S TARGET:              {per_day}",
+             f"SENT TODAY:                  {sent_n}",
              f"HELD, WAITING FOR YOUR REVIEW: {len(held)}",
              f"BOUNCED TODAY (bad address): {len(bounced_today)}",
-             f"FAILED TO SEND:              {len((run or {}).get('failed') or [])}",
+             f"FAILED TO SEND:              {failed_n}",
              f"NEW REAL REPLIES (24 hours): {len(new_replies)}",
              f"WAITING FOR A LATER DAY:     {queued} people (tomorrow sends up to {per_day})",
              ""]
@@ -1205,7 +1252,10 @@ def cmd_feedback(args, cfg):
     """Today's short feedback (what went well, rates, replies, what failed). With
     --email, also sends it to your own Gmail address (nobody else)."""
     if not args.no_imap and _safe_rows(_paths(cfg)[2])[1]:
-        cmd_backfill_dates(argparse.Namespace(apply=True), cfg)
+        try:
+            cmd_backfill_dates(argparse.Namespace(apply=True), cfg)
+        except Exception as e:  # still send the report, with the replies we have
+            print(f"Gmail reply check failed: {e}")
         print()
     subject, text = build_feedback(cfg, credits=deepline_credits())
     print(f"SUBJECT: {subject}\n\n{text}")
