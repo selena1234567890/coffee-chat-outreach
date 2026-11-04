@@ -207,3 +207,15 @@ def test_spot_check_rebuilds_sent_email(cfg, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Spot check: 1 of 1 sent on 2026-11-02" in out
     assert "Hi Pat, I noticed you have also studied in Emory" in out
+
+
+def test_email_at_the_target_list_domain_passes(cfg, tmp_path):
+    (tmp_path / "targets.csv").write_text("company,domain,tier,notes\nCiti,citi.com,2,\n")
+    cfg["files"]["targets"] = str(tmp_path / "targets.csv")
+    line = EMORY.format(a="a", title="Data Scientist", company="Citi")
+    row = _row(company="Citi", company_domain="citigroup.com", contact_email="pat.lee@citi.com",
+               personal_line=line)
+    assert _check(cfg, row) == []
+    other = _row(company="Citi", company_domain="citigroup.com", contact_email="pat.lee@ms.com",
+                 personal_line=line)
+    assert any("not citigroup.com" in r for _, r in _check(cfg, other))

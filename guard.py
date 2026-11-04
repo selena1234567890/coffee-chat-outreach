@@ -173,6 +173,7 @@ def check(row, headers, body, template_path, cfg):
     company_dom = common.main_domain(row.get("company_domain"))
     email_dom = common.main_domain(common.email_domain(row.get("contact_email")))
     if (company_dom and email_dom != company_dom
+            and email_dom != common.target_email_domain(row.get("company"), cfg)
             and (row.get("email_status") or "").strip().lower() != common.PUBLIC):
         out.append((REVIEW, f"email is at {email_dom}, not {company_dom}"))
     if (row.get("approved") or "").strip().lower() == "yes":
