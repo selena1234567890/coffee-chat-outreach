@@ -288,6 +288,48 @@ def test_gmail_limit_stops_and_pauses(monkeypatch, tmp_path, capsys):
     assert "Done. 2 sent" in out and "2 not sent" in out
 
 
+def test_dropped_connection_only_fails_that_email(monkeypatch, tmp_path, capsys):
+    # Gmail closes a connection left idle between emails; each email gets its own.
+    rows = [_person(f"p{i}@corp.com", type="referral") for i in range(4)]
+    cfg_path = _workspace(tmp_path, rows)
+    fake, sessions = _FakeSMTP(), []
+    monkeypatch.setattr(common, "get_password", lambda *a, **k: "pw")
+
+    @contextlib.contextmanager
+    def session(*a, **k):
+        sessions.append(1)
+        if len(sessions) == 2:
+            raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+        yield fake
+
+    monkeypatch.setattr(common, "smtp_session", session)
+    monkeypatch.setattr(send.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sys, "argv", ["send.py", "--config", str(cfg_path), "--send", "--yes"])
+    send.main()
+    assert len(sessions) == 4 and len(fake.sent) == 3
+    _, left = common.read_rows(str(tmp_path / "db.csv"))
+    assert [r["contact_email"] for r in left] == ["p1@corp.com"]   # kept for retry
+
+
+def test_error_after_gmail_accepted_still_counts_as_sent(monkeypatch, tmp_path):
+    rows = [_person("p@corp.com", type="referral")]
+    cfg_path = _workspace(tmp_path, rows)
+    fake = _FakeSMTP()
+    monkeypatch.setattr(common, "get_password", lambda *a, **k: "pw")
+
+    @contextlib.contextmanager
+    def session(*a, **k):
+        yield fake
+        raise smtplib.SMTPServerDisconnected("closed on goodbye")
+
+    monkeypatch.setattr(common, "smtp_session", session)
+    monkeypatch.setattr(sys, "argv", ["send.py", "--config", str(cfg_path), "--send", "--yes"])
+    send.main()
+    _, log = common.read_rows(str(tmp_path / "sent.csv"))
+    _, left = common.read_rows(str(tmp_path / "db.csv"))
+    assert [r["contact_email"] for r in log] == ["p@corp.com"] and left == []
+
+
 def test_unfilled_resume_link_blocks_the_send(monkeypatch, tmp_path, capsys):
     cfg_path = _workspace(tmp_path, [_person("p@corp.com", type="referral")],
                           blanks='[blanks]\nresume_link = "<link to your resume>"\n')

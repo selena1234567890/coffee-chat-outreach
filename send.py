@@ -35,6 +35,7 @@ import html
 import mimetypes
 import os
 import random
+import smtplib
 import sys
 import time
 from email.message import EmailMessage
@@ -343,21 +344,26 @@ def _main():
                                            if f not in common.SENT_LOG_FIELDS]
     remaining, failed, sent_n = list(rows), [], 0
     domain = username.rpartition("@")[2] or None
-    with common.smtp_session(host, port, username, password) as smtp:
-        for i, (r, headers, body) in enumerate(plan):
-            if i:
-                wait_between_emails(cfg)
-            if already_sent(r, LOG):
-                print(f"  skipped -> {r['contact_email']}: already in the sent log")
-                remaining.remove(r)
-                common.write_db(DB, fieldnames, remaining, ignore_extra=True)
-                continue
-            r["message_id"] = make_msgid(domain=domain)
-            try:
-                msg = build_message(r, headers, body, workspace)
-                r["subject_sent"] = msg["Subject"]
+    for i, (r, headers, body) in enumerate(plan):
+        if i:
+            wait_between_emails(cfg)
+        if already_sent(r, LOG):
+            print(f"  skipped -> {r['contact_email']}: already in the sent log")
+            remaining.remove(r)
+            common.write_db(DB, fieldnames, remaining, ignore_extra=True)
+            continue
+        r["message_id"] = make_msgid(domain=domain)
+        # A fresh Gmail connection per email: Gmail closes a connection left idle
+        # during the 1-3 minute wait, which used to fail every email after it.
+        delivered = False
+        try:
+            msg = build_message(r, headers, body, workspace)
+            r["subject_sent"] = msg["Subject"]
+            with common.smtp_session(host, port, username, password) as smtp:
                 smtp.send_message(msg)
-            except Exception as e:
+                delivered = True
+        except Exception as e:
+            if not delivered:
                 print(f"  FAILED -> {r['contact_email']} ({r.get('company')}): {e}")
                 failed.append(r)
                 if common.is_sending_limit_error(e):
@@ -365,21 +371,27 @@ def _main():
                     print(f"\n  Gmail says a sending limit was reached. Stopping now and "
                           f"pausing until {resume}; the rest stay in the batch.")
                     break
+                if isinstance(e, smtplib.SMTPAuthenticationError):
+                    print("\n  Gmail refused the login. Stopping now; the rest stay in "
+                          "the batch. Check the App Password in Keychain.")
+                    break
                 continue
-            # Sent successfully. A failure recording it is NOT a send failure: we
-            # must stop immediately rather than keep sending into an inconsistent
-            # state. The idempotency check above makes a later retry safe.
-            try:
-                common.archive(LOG, log_fields,
-                               [{**r, "sent_at": common.utcnow_iso()}])
-                remaining.remove(r)
-                common.write_db(DB, fieldnames, remaining, ignore_extra=True)
-            except Exception as e:
-                sys.exit(f"\n  CRITICAL: sent to {r['contact_email']} but failed to "
-                         f"record it: {e}\n  Aborting batch. Reconcile {os.path.basename(LOG)} "
-                         f"and {os.path.basename(DB)} before resending.")
-            print(f"  sent -> {r['contact_email']} ({r.get('company')})")
-            sent_n += 1
+            # Gmail accepted it and only the goodbye failed: it IS sent, so log it
+            # (retrying would email this person twice).
+        # Sent successfully. A failure recording it is NOT a send failure: we
+        # must stop immediately rather than keep sending into an inconsistent
+        # state. The idempotency check above makes a later retry safe.
+        try:
+            common.archive(LOG, log_fields,
+                           [{**r, "sent_at": common.utcnow_iso()}])
+            remaining.remove(r)
+            common.write_db(DB, fieldnames, remaining, ignore_extra=True)
+        except Exception as e:
+            sys.exit(f"\n  CRITICAL: sent to {r['contact_email']} but failed to "
+                     f"record it: {e}\n  Aborting batch. Reconcile {os.path.basename(LOG)} "
+                     f"and {os.path.basename(DB)} before resending.")
+        print(f"  sent -> {r['contact_email']} ({r.get('company')})")
+        sent_n += 1
 
     common.record_send_run(cfg, sent=sent_n, held=len(held), stopped=False,
                            failed=[f"{r['contact_email']} ({r.get('company')})" for r in failed],
