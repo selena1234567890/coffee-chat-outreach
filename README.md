@@ -54,7 +54,7 @@ Safety checks added:
 |---|---|---|
 | Email type, when `type` is blank | `[routing]` | `coffee_chat` if 3+ years at the company (`start_date`) or a lead / manager / director / principal / staff / head `title`; otherwise `referral` |
 | Order (who goes first) | target list, `[priority]` | **data/ML/AI job** first, then **company hiring a Data/ML/AI intern** (`data/open_roles.csv`, or `open_intern_roles = yes` on the row), then **tier** (1 big tech → 2 finance/banking/consulting → 3 other big companies → not listed), then matching `school` (e.g. Emory) or a tag in `priority_tags` |
-| Company tiers | `data/target_companies.csv` | you edit it: `company, domain, tier`; matched by company name or email domain. A `tier` typed in the row wins |
+| Company tiers | `data/target_companies.csv` | you edit it: `company, domain, tier`; matched by company name or email domain. A `tier` typed in the row wins. Private: not committed; see the `.example` |
 | Smallest company | `[company_limits].min_employees` | 1,000: smaller companies are skipped (they stay in the queue) |
 | Never cold email | `data/do_not_contact.csv` | people you already know: removed at `stage` and skipped at send. Match by email, or first name (+ last name) (+ company). Private: not committed; see the `.example` |
 | Automatic tags | `[priority.surname_lists]` | `last_name` found in `data/chinese_surnames.txt` → `chinese` tag |

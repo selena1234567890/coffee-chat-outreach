@@ -1,0 +1,4 @@
+company,domain,tier,notes
+Example Tech,exampletech.com,1,1 = big tech
+Example Bank,examplebank.com,2,2 = finance / banking / consulting
+Example Retail,exampleretail.com,3,3 = other big companies
