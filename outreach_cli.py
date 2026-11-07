@@ -507,7 +507,11 @@ def _print_health(cfg, sent_rows):
         print("  Spam check: never done. Run `outreach-send --spam-check you@outlook.com`.")
     else:
         age = (datetime.date.today() - datetime.date.fromisoformat(last["date"])).days
-        due = "  <- due, run one" if age >= every else ""
+        # Count from the last check SENT too: one still waiting for your answer
+        # isn't a reason to send another.
+        sent = state.get("spam_check_sent") or last["date"]
+        sent_age = (datetime.date.today() - datetime.date.fromisoformat(sent)).days
+        due = "  <- due, run one" if min(age, sent_age) >= every else ""
         print(f"  Spam check: {last['result']} ({age} day(s) ago){due}")
 
 

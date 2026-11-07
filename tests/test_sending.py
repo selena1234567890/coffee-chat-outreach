@@ -371,6 +371,17 @@ def test_health_spam_result_inbox_is_fine(tmp_path, capsys):
     assert "inbox. Good." in out and "13 emails/day" in out
 
 
+def test_spam_check_not_due_again_while_one_awaits_your_answer(tmp_path, capsys):
+    cfg = _stage_cfg(tmp_path)
+    today = datetime.date.today()
+    common.save_state(cfg, {"last_spam_check": {"date": (today - datetime.timedelta(days=10))
+                                                .isoformat(), "result": "inbox"},
+                            "spam_check_sent": (today - datetime.timedelta(days=1)).isoformat()})
+    outreach_cli.cmd_health(argparse.Namespace(spam_check=None, no_imap=True), cfg)
+    out = capsys.readouterr().out
+    assert "Spam check: inbox (10 day(s) ago)" in out and "due, run one" not in out
+
+
 def test_resume_link_shown_as_short_clickable_text(monkeypatch, tmp_path):
     rows = [_person("pat@corp.com", type="referral")]
     blanks = ('[blanks]\nresume_link = "https://drive.example/cv?usp=drive_link"\n'
