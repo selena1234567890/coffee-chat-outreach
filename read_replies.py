@@ -31,6 +31,7 @@ import csv
 import datetime
 import email
 import os
+import re
 import sys
 from email.utils import getaddresses, parsedate_to_datetime
 
@@ -147,6 +148,74 @@ def message_kind(imap, uid):
     """(kind, date) for one message: kind is 'bounce', 'auto' or 'reply'."""
     h = headers_of(imap, uid, CLASSIFY_FIELDS)
     return classify(h, body_start(imap, uid)), _parse_date(h.get("Date", ""))
+
+
+SCAN_FIELDS = CLASSIFY_FIELDS + ["In-Reply-To", "References"]
+SCAN_CHUNK = 500  # messages per bulk header FETCH
+
+
+def _bulk_headers(imap, uids, fields):
+    """{uid: headers} for many messages, SCAN_CHUNK per FETCH (read-only)."""
+    out = {}
+    for i in range(0, len(uids), SCAN_CHUNK):
+        chunk = b",".join(uids[i:i + SCAN_CHUNK]).decode()
+        typ, data = imap.uid("fetch", chunk,
+                             f"(UID BODY.PEEK[HEADER.FIELDS ({' '.join(fields)})])")
+        if typ != "OK":
+            raise ConnectionError(f"Gmail header fetch failed: {typ}")
+        for part in data or []:
+            if not isinstance(part, tuple):
+                continue                                     # the b")" separators
+            m = re.search(rb"UID (\d+)", part[0])
+            if not m:
+                continue
+            msg = email.message_from_string(part[1].decode("utf-8", "replace"))
+            out[m.group(1)] = {f: common.decode_header_str(msg.get(f, "")) for f in fields}
+    return out
+
+
+def scan_replies(imap, contacts, msgids, our_addr, since=None):
+    """Replies and bounces for all `contacts` in a few round-trips (select All Mail first).
+
+    One SEARCH for everything since `since` (a date) not from us, one bulk header
+    FETCH, then local matching: a message counts for a contact if it is FROM their
+    address or references one of the Message-IDs we sent them (`msgids`: id -> address),
+    so a reply from a different address is caught too. Only matched messages get their
+    body read, to tell real replies from bounces and automatic replies.
+
+    Returns (replies {addr: latest date}, bounced {addrs}, thread_only {addrs}).
+    The old way was ~4 searches per contact, which Gmail cut off at ~150 contacts.
+    """
+    our = (our_addr or "").lower()
+    crit = ["NOT", "FROM", f'"{our_addr}"'] if our else ["ALL"]
+    if since:
+        crit = ["SINCE", since.strftime("%d-%b-%Y")] + crit
+    typ, data = imap.uid("search", None, *crit)
+    if typ != "OK":
+        raise ConnectionError(f"Gmail search failed: {typ}")
+    uids = (data[0] or b"").split() if data else []
+    contacts = set(contacts)
+    replies, bounced, by_from = {}, set(), set()
+    for uid, h in _bulk_headers(imap, uids, SCAN_FIELDS).items():
+        senders = {a.lower() for _, a in getaddresses([h.get("From", "")]) if a}
+        if our in senders:
+            continue                                         # our own message
+        refs = set(re.findall(r"<[^<>\s]+>", f"{h.get('In-Reply-To', '')} "
+                                             f"{h.get('References', '')}"))
+        from_hits = senders & contacts
+        thread_hits = {msgids[r] for r in refs if r in msgids}
+        if not (from_hits or thread_hits):
+            continue
+        kind = classify(h, body_start(imap, uid))
+        date = _parse_date(h.get("Date", ""))
+        for addr in from_hits | thread_hits:
+            if kind == "bounce" and addr in thread_hits:
+                bounced.add(addr)
+            elif kind == "reply" and date and date > replies.get(addr, ""):
+                replies[addr] = date
+                if addr in from_hits:
+                    by_from.add(addr)
+    return replies, bounced, set(replies) - by_from
 
 
 def sent_meta_for(imap, addr):

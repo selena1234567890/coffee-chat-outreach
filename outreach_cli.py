@@ -19,6 +19,7 @@ import argparse
 import collections
 import csv
 import datetime
+import imaplib
 import json
 import os
 import re
@@ -808,6 +809,13 @@ def cmd_followup(args, cfg):
           "authoritative for edge cases.")
 
 
+def _imap_logout(imap):
+    try:
+        imap.logout()
+    except Exception:
+        pass
+
+
 def cmd_backfill_dates(args, cfg):
     """Sync sent_at + last_reply from Gmail (Sent folder + replies). Universal.
 
@@ -828,46 +836,53 @@ def cmd_backfill_dates(args, cfg):
         raise SystemExit("ERROR: set [email].address in config.toml first.")
 
     our_addr = em["address"]
-    sent_found, reply_found, bounced, thread_only = {}, {}, set(), 0
-    meta = {}  # addr -> [message_ids] of mail we sent them (for thread matching)
-    imap = common.imap_login(our_addr, common.get_password(em["keychain_service"]),
-                             readonly=True, host=em["imap_host"], mailbox=read_replies.SENT_MAIL)
-    try:
-        print(f"Pass 1: send dates + message-ids for {len(rows)} contact(s) (Gmail Sent)...")
-        for r in rows:
-            addr = common.normalize_email(r.get("contact_email"))
-            if not addr:
-                continue
-            date, msgids = read_replies.sent_meta_for(imap, addr)
-            meta[addr] = msgids
-            if date and not (r.get("sent_at") or "").strip():
-                sent_found[addr] = date
-        typ, _ = imap.select(common.ALL_MAIL, readonly=True)
-        if typ != "OK":
-            imap.select("INBOX", readonly=True)
-        print(f"Pass 2: replies for {len(rows)} contact(s) (FROM-match + thread-match)...")
-        for r in rows:
-            addr = common.normalize_email(r.get("contact_email"))
-            if not addr:
-                continue
-            by_from = read_replies.last_reply_for(imap, addr)
-            by_thread, bounce = read_replies.thread_reply_for(imap, meta.get(addr, []),
-                                                              our_addr)
-            if bounce:
-                bounced.add(addr)
-            latest = max([d for d in (by_from, by_thread) if d], default=None)
-            if latest:
-                reply_found[addr] = latest
-                if by_thread and not by_from:
-                    thread_only += 1  # caught only because of thread matching
-    finally:
+    password = common.get_password(em["keychain_service"])
+    sent_found = {}
+    msgids = {}  # Message-ID of mail we sent -> contact address (for thread matching)
+    for r in rows:
+        addr = common.normalize_email(r.get("contact_email"))
+        mid = (r.get("message_id") or "").strip()
+        if addr and mid:
+            msgids[mid] = addr
+    # Pass 1 only for rows missing a send date or Message-ID (send.py logs both).
+    missing = [r for r in rows if common.normalize_email(r.get("contact_email"))
+               and not ((r.get("sent_at") or "").strip() and (r.get("message_id") or "").strip())]
+    if missing:
+        imap = common.imap_login(our_addr, password, readonly=True, host=em["imap_host"],
+                                 mailbox=read_replies.SENT_MAIL)
         try:
-            imap.logout()
-        except Exception:
-            pass
+            print(f"Pass 1: send dates + message-ids for {len(missing)} contact(s) "
+                  f"(Gmail Sent)...")
+            for r in missing:
+                addr = common.normalize_email(r.get("contact_email"))
+                date, found = read_replies.sent_meta_for(imap, addr)
+                msgids.update({m: addr for m in found})
+                if date and not (r.get("sent_at") or "").strip():
+                    sent_found[addr] = date
+        finally:
+            _imap_logout(imap)
+
+    contacts = {common.normalize_email(r.get("contact_email")) for r in rows} - {""}
+    dates = [d[:10] for d in [r.get("sent_at") or "" for r in rows]
+             + list(sent_found.values()) if d]
+    since = (datetime.date.fromisoformat(min(dates)) - datetime.timedelta(days=1)
+             if dates else None)
+    print(f"Pass 2: replies for {len(contacts)} contact(s) (one Gmail scan)...")
+    for attempt in (1, 2):   # Gmail sometimes drops the connection: one fresh retry
+        imap = common.imap_login(our_addr, password, readonly=True, host=em["imap_host"])
+        try:
+            reply_found, bounced, thread_only = read_replies.scan_replies(
+                imap, contacts, msgids, our_addr, since)
+            break
+        except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError, ConnectionError) as e:
+            if attempt == 2:
+                raise
+            print(f"  Gmail dropped the connection ({e}); trying once more...")
+        finally:
+            _imap_logout(imap)
 
     print(f"Found send dates for {len(sent_found)}; replies from {len(reply_found)} "
-          f"contact(s) ({thread_only} via thread-match / different address); "
+          f"contact(s) ({len(thread_only)} via thread-match / different address); "
           f"{len(bounced)} bounced. (Bounce notices and automatic replies are not "
           f"counted as replies.)")
     if not args.apply:

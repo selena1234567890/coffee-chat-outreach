@@ -79,20 +79,34 @@ class _FakeIMAP:
         return False
 
     def uid(self, op, *args):
+        self.calls = getattr(self, "calls", 0) + 1
         if op == "search":
-            crit = tuple(a for a in args[1:])  # drop charset (None)
-            hits = [str(m["uid"]).encode() for m in self._box() if self._match(m, crit)]
+            crit = list(args[1:])  # drop charset (None)
+            if crit[0] == "SINCE":                         # the bulk scan: all but ours
+                crit = crit[2:]
+            if crit[0] in ("ALL", "NOT"):
+                ours = crit[2].strip('"').lower() if crit[0] == "NOT" else None
+                hits = [str(m["uid"]).encode() for m in self._box()
+                        if not ours or ours not in m["h"].get("From", "").lower()]
+            else:
+                hits = [str(m["uid"]).encode() for m in self._box()
+                        if self._match(m, tuple(crit))]
             return ("OK", [b" ".join(hits) if hits else b""])
         if op == "fetch":
-            uid, spec = int(args[0]), args[1]
-            m = next((x for x in self._box() if x["uid"] == uid), None)
-            if not m:
-                return ("OK", [None])
-            if "FIELDS" not in spec:                       # body (TEXT or whole message)
-                return ("OK", [(b"meta", m.get("body", "").encode())])
-            fields = re.search(r"FIELDS \(([^)]+)\)", spec).group(1).split()
-            raw = "".join(f"{f}: {m['h'].get(f, '')}\r\n" for f in fields) + "\r\n"
-            return ("OK", [(b"meta", raw.encode())])
+            spec, out = args[1], []
+            ids = args[0].decode() if isinstance(args[0], bytes) else str(args[0])
+            for uid in (int(u) for u in ids.split(",")):
+                m = next((x for x in self._box() if x["uid"] == uid), None)
+                if not m:
+                    continue
+                meta = f"{uid} (UID {uid} BODY[] {{1}}".encode()
+                if "FIELDS" not in spec:                   # body (TEXT or whole message)
+                    out += [(meta, m.get("body", "").encode()), b")"]
+                    continue
+                fields = re.search(r"FIELDS \(([^)]+)\)", spec).group(1).split()
+                raw = "".join(f"{f}: {m['h'].get(f, '')}\r\n" for f in fields) + "\r\n"
+                out += [(meta, raw.encode()), b")"]
+            return ("OK", out or [None])
         return ("NO", [b""])
 
     def logout(self):
@@ -339,3 +353,64 @@ def test_bounces_at_blocked_companies_do_not_pause(tmp_path):
     assert not common.load_state(cfg).get("paused_until")
     outreach_cli.apply_bounces(cfg, str(sent_log), {"p0@x.com", "p1@x.com"})
     assert common.load_state(cfg).get("paused_until")
+
+
+def test_backfill_checks_many_people_in_a_few_gmail_requests(tmp_path, monkeypatch):
+    # 150 people, all logged with send date + Message-ID: no per-person searches
+    # (the old way did ~4 per person and Gmail cut the connection off).
+    sent_log = tmp_path / "sent.csv"
+    people = [{"contact_email": f"p{i}@x.com", "company": "X", "message_id": f"<m{i}@gmail.com>",
+               "sent_at": "2026-11-02T17:00:00Z", "last_reply": ""} for i in range(150)]
+    common.write_db(str(sent_log), list(people[0]), people)
+    msgs = [{"box": ALL, "uid": 5, "h": {"From": "p7@x.com", "To": "me@x.com",
+                                         "Subject": "Re: hi",
+                                         "Date": "Tue, 03 Nov 2026 09:00:00 -0500"},
+             "body": "Happy to help!"},
+            {"box": ALL, "uid": 6, "h": {"From": "other@y.com", "To": "me@x.com",
+                                         "Subject": "Re: hi", "References": "<m9@gmail.com>",
+                                         "Date": "Wed, 04 Nov 2026 09:00:00 -0500"},
+             "body": "Answering from my personal address."},
+            {"box": ALL, "uid": 7, "h": {"From": "me@x.com", "To": "p8@x.com",
+                                         "In-Reply-To": "<m8@gmail.com>",
+                                         "Date": "Wed, 04 Nov 2026 10:00:00 -0500"}}]
+    fake = _FakeIMAP(msgs)
+    monkeypatch.setattr(common, "get_password", lambda *a, **k: "pw")
+    monkeypatch.setattr(common, "imap_login", _login_selecting(fake))
+    outreach_cli.cmd_backfill_dates(argparse.Namespace(apply=True),
+                                    _backfill_cfg(tmp_path, sent_log))
+    _, rows = common.read_rows(str(sent_log))
+    replied = {r["contact_email"]: r["last_reply"] for r in rows if r["last_reply"]}
+    assert replied == {"p7@x.com": "2026-11-03T14:00:00Z",
+                       "p9@x.com": "2026-11-04T14:00:00Z"}    # our own message (p8) ignored
+    assert fake.calls <= 6                                    # 1 search + 1 fetch + 2 bodies
+
+
+def test_backfill_retries_once_when_gmail_drops_the_connection(tmp_path, monkeypatch):
+    import imaplib
+    sent_log = tmp_path / "sent.csv"
+    common.write_db(str(sent_log), ["contact_email", "company", "message_id", "sent_at"],
+                    [{"contact_email": "a@x.com", "company": "A", "message_id": "<a@gmail.com>",
+                      "sent_at": "2026-11-02T17:00:00Z"}])
+    msgs = [{"box": ALL, "uid": 9, "h": {"From": "a@x.com", "Subject": "Re: hi",
+                                         "Date": "Tue, 03 Nov 2026 09:00:00 -0500"},
+             "body": "Sure!"}]
+    logins = []
+
+    class _Dropping(_FakeIMAP):
+        def uid(self, op, *args):
+            if len(logins) == 1:
+                raise imaplib.IMAP4.abort("command: UID => socket error: EOF")
+            return super().uid(op, *args)
+
+    def _login(*a, **k):
+        logins.append(1)
+        fake = _Dropping(msgs)
+        fake.select(ALL)
+        return fake
+
+    monkeypatch.setattr(common, "get_password", lambda *a, **k: "pw")
+    monkeypatch.setattr(common, "imap_login", _login)
+    outreach_cli.cmd_backfill_dates(argparse.Namespace(apply=True),
+                                    _backfill_cfg(tmp_path, sent_log))
+    _, rows = common.read_rows(str(sent_log))
+    assert len(logins) == 2 and rows[0]["last_reply"] == "2026-11-03T14:00:00Z"
