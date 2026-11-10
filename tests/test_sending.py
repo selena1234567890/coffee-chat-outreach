@@ -211,10 +211,26 @@ def _workspace(tmp_path, rows, sent=(), templates=None, blanks=""):
     return cfg_path
 
 
-def _send(monkeypatch, cfg_path, *flags, fake=None):
+class _FakeImap:
+    def logout(self):
+        pass
+
+
+def _send(monkeypatch, cfg_path, *flags, fake=None, replies=None, imap_error=None):
     fake = fake or _FakeSMTP()
     waits = []
     monkeypatch.setattr(common, "get_password", lambda *a, **k: "pw")
+    import read_replies  # never touch real Gmail: the follow-up reply check is faked
+
+    def login(*a, **k):
+        if imap_error:
+            raise imap_error
+        return _FakeImap()
+
+    monkeypatch.setattr(common, "imap_login", login)
+    monkeypatch.setattr(read_replies, "last_reply_for",
+                        lambda imap, addr: (replies or {}).get(addr))
+    monkeypatch.setattr(read_replies, "thread_reply_for", lambda imap, mids, our: (None, False))
 
     @contextlib.contextmanager
     def session(*a, **k):
@@ -473,3 +489,73 @@ def test_no_followup_when_either_copy_of_a_double_send_got_a_reply(tmp_path):
               "last_reply": _utc(TODAY)}
     assert outreach_cli.due_followups([first, second], [], cfg, today=TODAY) == []
     assert len(outreach_cli.due_followups([first], [], cfg, today=TODAY)) == 1
+
+
+def _followup_of(first):
+    return {**first, "type": "followup", "in_reply_to": first["message_id"],
+            "original_subject": first["subject_sent"], "sent_at": "", "message_id": "",
+            "subject_sent": ""}
+
+
+def test_followup_not_sent_to_someone_who_already_replied(monkeypatch, tmp_path):
+    first = _sent("a@corp.com", 6)
+    cfg = _workspace(tmp_path, [_followup_of(first)], sent=[first])
+    fake, _ = _send(monkeypatch, cfg, "--send", "--yes",
+                    replies={"a@corp.com": "2026-11-08T09:00:00Z"})
+    assert fake.sent == []
+    _, log = common.read_rows(str(tmp_path / "sent.csv"))
+    assert log[0]["last_reply"] == "2026-11-08T09:00:00Z"   # never due again
+    assert common.read_rows(str(tmp_path / "db.csv"))[1] == []
+
+
+def test_followup_waits_when_gmail_cannot_be_read(monkeypatch, tmp_path, capsys):
+    first = _sent("a@corp.com", 6)
+    cfg = _workspace(tmp_path, [_followup_of(first)], sent=[first])
+    fake, _ = _send(monkeypatch, cfg, "--send", "--yes", imap_error=OSError("EOF"))
+    assert fake.sent == []
+    assert "waits for the next day" in capsys.readouterr().out
+    _, log = common.read_rows(str(tmp_path / "sent.csv"))
+    assert not log[0]["last_reply"]                          # due again next day
+
+
+def test_daily_stages_followups_even_if_reply_check_fails(monkeypatch, tmp_path, capsys):
+    cfg = _stage_cfg(tmp_path)
+    common.write_db(cfg["files"]["sent_log"], FIELDS, [_sent("due@a.com", 5)])
+    common.write_db(cfg["files"]["queue"], FIELDS, [])
+    monkeypatch.setattr(outreach_cli, "check_replies_in_background", lambda cfg: False)
+    monkeypatch.setattr(outreach_cli, "cmd_health", lambda a, c: None)
+    monkeypatch.setattr(outreach_cli, "cmd_preview", lambda a, c: None)
+    monkeypatch.setattr(outreach_cli, "due_followups",
+                        lambda s, d, c, today=None: [{**s[0], "type": "followup",
+                                                      "in_reply_to": s[0]["message_id"]}])
+    outreach_cli.cmd_daily(argparse.Namespace(no_imap=False), cfg)
+    out = capsys.readouterr().out
+    assert "Staged 1 follow-up(s)" in out
+    assert "checked for a reply on its own" in out
+
+
+def test_no_sending_on_skip_days(monkeypatch, tmp_path, capsys):
+    today = datetime.date.today().strftime("%a")
+    cfg = _workspace(tmp_path, [_person("p@corp.com", type="referral")])
+    cfg.write_text(cfg.read_text() + f'[sending]\nskip_days = ["{today}"]\n')
+    fake, _ = _send(monkeypatch, cfg, "--send", "--yes")
+    assert fake.sent == []
+    assert "No emails on" in capsys.readouterr().out
+    assert len(common.read_rows(str(tmp_path / "db.csv"))[1]) == 1  # batch waits
+
+
+def test_is_skip_day():
+    cfg = {"sending": {"skip_days": ["Saturday"]}}
+    assert common.is_skip_day(cfg, datetime.date(2026, 11, 14))       # a Saturday
+    assert not common.is_skip_day(cfg, datetime.date(2026, 11, 10))   # a Tuesday
+    assert not common.is_skip_day({"sending": {}}, datetime.date(2026, 11, 14))
+
+
+def test_missing_attachment_blocks_the_batch(monkeypatch, tmp_path, capsys):
+    cfg = _workspace(tmp_path, [_person("p@corp.com", type="referral")])
+    t = tmp_path / "templates" / "referral_1.txt"
+    t.write_text("TO: {{contact_email}}\nSUBJECT: Hi\nATTACHMENT: nope/resume.pdf\n\nV1\n")
+    (tmp_path / "templates" / "referral_2.txt").write_text(t.read_text())
+    with pytest.raises(SystemExit):
+        _send(monkeypatch, cfg, "--send", "--yes")
+    assert "attachment not found" in capsys.readouterr().out

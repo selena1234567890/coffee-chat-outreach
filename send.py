@@ -76,6 +76,50 @@ def already_sent(r, log_path):
     return False
 
 
+def _is_followup(row):
+    return (row.get("type") or "").strip().lower() == "followup"
+
+
+def followup_blocker(cfg, row, password):
+    """Check Gmail, right before sending, whether this person already replied to (or
+    bounced) the first email. Returns why the follow-up must NOT go out, or "".
+
+    This makes follow-ups safe even on days the morning bulk reply check didn't
+    finish. A reply or bounce found here is written to the sent log, so the person
+    is never due again. If Gmail can't be read, the follow-up waits (never sent
+    blind) and is staged again the next sending day.
+    """
+    import read_replies  # local import: only follow-ups need IMAP here
+    em = cfg["email"]
+    addr = common.normalize_email(row.get("contact_email"))
+    mid = (row.get("in_reply_to") or "").strip()
+    try:
+        imap = common.imap_login(em["address"], password, readonly=True,
+                                 host=em["imap_host"])
+        try:
+            replied = read_replies.last_reply_for(imap, addr)
+            thread_reply, bounced = (read_replies.thread_reply_for(imap, [mid], em["address"])
+                                     if mid else (None, False))
+        finally:
+            with contextlib.suppress(Exception):
+                imap.logout()
+    except Exception as e:
+        return f"couldn't check Gmail for a reply ({e}); it waits for the next day"
+    replied = max(d for d in (replied, thread_reply) if d) if (replied or thread_reply) else None
+    if not (replied or bounced):
+        return ""
+    log = cfg["files"]["sent_log"]
+    fields, rows = common.read_rows(log)
+    for r in rows:
+        if common.normalize_email(r.get("contact_email")) == addr and not _is_followup(r):
+            if replied and not (r.get("last_reply") or "").strip():
+                r["last_reply"] = replied
+            if bounced and not (r.get("bounced_at") or "").strip():
+                r["bounced_at"] = datetime.date.today().isoformat()
+    common.write_db(log, fields, rows)
+    return f"they already replied ({replied})" if replied else "the first email bounced"
+
+
 def build_message(row, headers, body, base_dir):
     """Render an email; ATTACHMENT is resolved relative to `base_dir` (the workspace)."""
     msg = EmailMessage()
@@ -173,6 +217,10 @@ def _main():
     args = ap.parse_args()
 
     cfg = common.load_config(common.find_config(args.config))
+    if args.send and common.is_skip_day(cfg):
+        print(f"No emails on {datetime.date.today():%A}s ([sending].skip_days). "
+              "Nothing sent; today's batch waits for the next day.")
+        return
     workspace = cfg["workspace"]
     DB = cfg["files"]["database"]
     LOG = cfg["files"]["sent_log"]
@@ -242,6 +290,11 @@ def _main():
         blank = common.missing_fields(r, headers, body)
         if blank:
             problems.append(f"{who}: blank {', '.join(blank)}")
+        attach = headers.get("ATTACHMENT")
+        if attach:
+            file = common.resolve(common.render(attach, r), workspace)
+            if not os.path.isfile(file):
+                problems.append(f"{who}: attachment not found: {file}")
         plan.append((r, headers, body))
     if problems:
         print(f"ERROR: {len(problems)} row(s) need fixing in {os.path.basename(DB)}; "
@@ -352,6 +405,15 @@ def _main():
             remaining.remove(r)
             common.write_db(DB, fieldnames, remaining, ignore_extra=True)
             continue
+        if _is_followup(r):
+            why = followup_blocker(cfg, r, password)
+            if why:
+                # Out of today's batch. A reply or bounce is recorded so it is never
+                # due again; if Gmail couldn't be read, it is staged again next day.
+                print(f"  skipped follow-up -> {r['contact_email']}: {why}")
+                remaining.remove(r)
+                common.write_db(DB, fieldnames, remaining, ignore_extra=True)
+                continue
         r["message_id"] = make_msgid(domain=domain)
         # A fresh Gmail connection per email: Gmail closes a connection left idle
         # during the 1-3 minute wait, which used to fail every email after it.

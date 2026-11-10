@@ -218,6 +218,10 @@ def cmd_stage(args, cfg):
     7. at most N in total (-n, default [pacing].batch_size)
     People skipped by 2 and 5-7 stay in the queue (for another day, or a changed setting).
     """
+    if common.is_skip_day(cfg):
+        print(f"No emails on {datetime.date.today():%A}s ([sending].skip_days), "
+              "so nothing is staged today.")
+        return
     queue, db, sent_log = _paths(cfg)
     q_fields, q_rows = _safe_rows(queue)
     db_fields, db_rows = _safe_rows(db)
@@ -719,8 +723,15 @@ def cmd_daily(args, cfg):
     if common.ramp_status(cfg, first_send=common.first_send_date(sent_rows))["per_day"] == 0:
         print("\nPaused, so nothing is staged today.")
         return
+    if common.is_skip_day(cfg):
+        print(f"\nNo emails on {datetime.date.today():%A}s ([sending].skip_days), "
+              "so nothing is staged today.")
+        return
     print("\n=== 3. Today's batch ===")
-    cmd_stage(argparse.Namespace(n=None, no_followups=not replies_ok and not args.no_imap), cfg)
+    if not replies_ok and not args.no_imap:
+        print("The Gmail reply check didn't finish, so each follow-up is checked for a "
+              "reply on its own, right before it is sent.")
+    cmd_stage(argparse.Namespace(n=None, no_followups=False), cfg)
     print("\n=== 4. Preview (check every >> CHECK line) ===")
     cmd_preview(argparse.Namespace(), cfg)
     print("\nNext: `outreach-send --test` (to you), read it, then "
@@ -1184,13 +1195,19 @@ def build_feedback(cfg, today=None, credits=None, now=None):
     run = run if run.get("date") == day else {}
     ramp = common.ramp_status(cfg, first_send=common.first_send_date(sent_rows), today=today)
     per_day = ramp["per_day"] or common.DEFAULT_RAMP["steps"][ramp["step"]][0]
+    skip_day = common.is_skip_day(cfg, today)
+    tomorrow = per_day  # what the next sending day can send
+    if skip_day:
+        per_day = 0
     held = _safe_rows(cfg["files"]["held"])[1]
     queued = len(_safe_rows(queue)[1])
     sent_n = sum(_sent_today(r, today) for r in sent_rows)  # every email Gmail sent today
     failed_n = len((run or {}).get("failed") or [])
 
     needs, good = [], []
-    if not run:
+    if skip_day and not run:
+        good.append(f"No emails on {today:%A}s (your choice); sending resumes tomorrow.")
+    elif not run:
         needs.append("Nothing was sent today (the 10 am run didn't send).")
     elif run.get("stopped"):
         needs.append("SAFETY STOP: nothing was sent. Problems: "
@@ -1218,10 +1235,11 @@ def build_feedback(cfg, today=None, credits=None, now=None):
                      + ", ".join(f"{r.get('first_name')} {r.get('last_name')} "
                                  f"({r.get('company')})" for r in held)
                      + ". Say \"approve <name>\" or \"drop <name>\" in any Claude chat.")
-    if queued < per_day // 2:
+    if queued < tomorrow // 2:
         needs.append(f"Only {queued} people are waiting to be emailed, and tomorrow can send "
-                     f"{per_day}. The contact finder couldn't find enough; check Deepline credits.")
-    needs += credit_warnings(credits, per_day)
+                     f"{tomorrow}. The contact finder couldn't find enough; "
+                     "check Deepline credits.")
+    needs += credit_warnings(credits, tomorrow)
     stale = hiring_todo(cfg, today=today)
     if stale:
         good.append(f"Hiring check: {len(stale)} target companies still to (re)check; "
@@ -1234,7 +1252,7 @@ def build_feedback(cfg, today=None, credits=None, now=None):
              f"BOUNCED TODAY (bad address): {len(bounced_today)}",
              f"FAILED TO SEND:              {failed_n}",
              f"NEW REAL REPLIES (24 hours): {len(new_replies)}",
-             f"WAITING FOR A LATER DAY:     {queued} people (tomorrow sends up to {per_day})",
+             f"WAITING FOR A LATER DAY:     {queued} people (tomorrow sends up to {tomorrow})",
              ""]
     lines.append("Everything's good." if not needs else "Needs you:")
     lines += [f"  - {x}" for x in needs]
@@ -1251,7 +1269,8 @@ def build_feedback(cfg, today=None, credits=None, now=None):
               f"REFERRAL SUCCESS RATE:  {referrals} referrals / {n} emailed = "
               f"{_rate(referrals, n).strip()}",
               f"People who replied so far: {len(replied)}",
-              "", f"Ramp: up to {per_day} emails/day (step {ramp['step'] + 1} of 4).",
+              "", f"Ramp: up to {tomorrow} emails/day (step {ramp['step'] + 1} of "
+                  f"{len({**common.DEFAULT_RAMP, **(cfg.get('ramp') or {})}['steps'])}).",
               "", "Got a referral or a coffee chat? Tell Claude, and it will be recorded."]
     if held:
         lines += ["", "=" * 60, f"EMAILS WAITING FOR YOUR REVIEW ({len(held)})", "=" * 60,

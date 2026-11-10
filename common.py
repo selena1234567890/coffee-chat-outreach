@@ -73,7 +73,8 @@ DEFAULT_RAMP = {"enabled": True, "steps": [[13, 3], [18, 7], [25, 7], [35, 0]],
 # One follow-up to people who haven't replied after this many business days.
 DEFAULT_FOLLOWUP = {"enabled": True, "after_business_days": 3}
 # Random wait between emails at send time, so they don't all go out at once.
-DEFAULT_SENDING = {"min_gap_seconds": 60, "max_gap_seconds": 180, "spam_check_address": ""}
+DEFAULT_SENDING = {"min_gap_seconds": 60, "max_gap_seconds": 180, "spam_check_address": "",
+                   "skip_days": []}
 # Share of each day's emails per company tier, in percent.
 DEFAULT_TIER_SHARE = {1: 60, 2: 30, 3: 10}
 # Who is staged first. Empty by default; set yours in config.toml.
@@ -232,6 +233,8 @@ min_gap_seconds = 60
 max_gap_seconds = 180
 # Another inbox of yours (e.g. Outlook) for spam checks; Agent 2 uses it.
 spam_check_address = ""
+# Days with no emails at all (new or follow-up), e.g. ["Sat"].
+skip_days = []
 
 # Share of each day's emails per company tier (percent). Every tier with a share
 # above 0 gets at least 1 a day; slots a tier can't fill go to the best people left.
@@ -346,6 +349,14 @@ def validate_for_send(cfg):
         missing = [h for h in ("TO", "SUBJECT") if h not in headers]
         if missing:
             raise ValueError(f"template {template} missing header(s): {', '.join(missing)}")
+
+
+def is_skip_day(cfg, today=None):
+    """True if today is one of [sending].skip_days ("Sat", "Saturday", ...): no
+    emails at all go out that day, new or follow-up."""
+    days = (cfg.get("sending") or {}).get("skip_days") or []
+    name = (today or datetime.date.today()).strftime("%a").lower()
+    return any(str(d).strip().lower()[:3] == name for d in days)
 
 
 def template_paths(cfg):
