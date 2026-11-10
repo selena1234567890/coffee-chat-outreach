@@ -58,3 +58,22 @@ def test_keeps_headline_naming_the_same_company_and_strips_nickname():
                 headline="Lead Data Scientist @ Delta Air Lines | Emory MSBA")
     leads, skipped = outreach_cli.deepline_to_leads([p], [_email()], {})
     assert not skipped and leads[0]["first_name"] == "Kailang"
+
+
+def test_non_alumni_get_the_plain_profile_line_and_pass_the_safety_check():
+    import guard
+    leads, _ = outreach_cli.deepline_to_leads([_person()], [_email()], {}, alumni=False)
+    lead = leads[0]
+    assert lead["school"] == ""
+    assert lead["personal_line"] == ("I came across your profile and was genuinely impressed "
+                                     "by your work as a Data Scientist at Google.")
+    assert guard.check_line(lead["personal_line"], lead, {}) == []
+
+
+def test_company_ending_in_a_period_gets_one_period():
+    import guard
+    p = _person(company="Cox Automotive Inc.", headline="Data Scientist @ Cox Automotive")
+    leads, _ = outreach_cli.deepline_to_leads([p], [_email()], {})
+    line = leads[0]["personal_line"]
+    assert line.endswith("at Cox Automotive Inc.") and not line.endswith("..")
+    assert guard.check_line(line, leads[0], {}) == []

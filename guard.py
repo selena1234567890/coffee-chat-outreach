@@ -95,7 +95,9 @@ def check_line(line, row, cfg):
             continue
         found = m.groupdict()
         out = []
-        if "company" in found and found["company"].strip() != (row.get("company") or "").strip():
+        # A trailing period is ignored: "at Cox Automotive Inc." ends the sentence once.
+        if "company" in found and (found["company"].strip().rstrip(".")
+                                   != (row.get("company") or "").strip().rstrip(".")):
             out.append(f"line names {found['company']!r}, but their company is "
                        f"{row.get('company')!r}")
         title = found.get("title", "")

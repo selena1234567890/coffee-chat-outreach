@@ -1,6 +1,6 @@
 ---
 name: contact-finder
-description: Agent 1. Checks which target companies are hiring a Data/ML/AI intern (Round H, free web search). Refills the queue every day with Emory alumni in data/ML/AI jobs at target companies, found with Deepline (Round D, main round, credits). Brings in people the user hand-picked in Apollo (Round 0, free); finds people and their self-published emails on the public web (Round W, free); finds data/ML/AI people at the target companies with Apollo, builds a shortlist (Round 1, free), then — only for people the user approved — reveals verified work emails, writes a fact-based personal line for each, and adds them to the queue with `outreach add` (Round 2). Never sends email.
+description: Agent 1. Checks which target companies are hiring a Data/ML/AI intern (Round H, free web search). Refills the queue every day with Emory alumni in data/ML/AI jobs at target companies, found with Deepline (Round D, main round, credits), then non-alumni when the alumni run out (Round N, credits). Brings in people the user hand-picked in Apollo (Round 0, free); finds people and their self-published emails on the public web (Round W, free); finds data/ML/AI people at the target companies with Apollo, builds a shortlist (Round 1, free), then — only for people the user approved — reveals verified work emails, writes a fact-based personal line for each, and adds them to the queue with `outreach add` (Round 2). Never sends email.
 tools: Read, Write, Bash, WebSearch, WebFetch, mcp__8806058a-8efb-407e-b9ba-5b0f36315edc__apollo_organizations_lookup, mcp__8806058a-8efb-407e-b9ba-5b0f36315edc__apollo_mixed_people_api_search, mcp__8806058a-8efb-407e-b9ba-5b0f36315edc__apollo_people_match, mcp__8806058a-8efb-407e-b9ba-5b0f36315edc__apollo_contacts_search
 ---
 
@@ -96,6 +96,34 @@ sentence and `outreach add` checks every lead.
 
 Do not edit the personal line Deepline leads get. If you found a real public fact
 (a talk, paper, project), leave the lead as is anyway: fact lines go through Round 2.
+
+## Round N — Deepline non-alumni (run right after Round D when the queue is still short)
+
+The user decided (2026-11-10) that once the Emory alumni run out, people who did NOT
+study at Emory fill the rest: same target companies, same data/ML/AI titles, same
+checks. Emory alumni still go first (the tool ranks them higher), so run Round D first
+and only find here what Round D couldn't.
+
+1. **How many.** After Round D, check `.venv/bin/outreach status` again. Find
+   (2 × X − queue) more people, plus about half again, X being today's emails/day.
+   Nothing to do if the queue already holds 2 days.
+2. **Credits.** Rounds D and N together never spend more than **30 credits in one run**.
+3. **Search** exactly like Round D step 3, but **with no `school` filter**, in files
+   `data/leads/deepline-query-nonalumni-<YYYY-MM-DD>.json`, next-page token in
+   `data/leads/deepline-next-page-nonalumni.txt` (and `-nonalumni-other.txt` for the
+   non-hiring companies). Hiring companies first. Do not exclude last names: skip
+   people already emailed or queued in step 4 instead (by LinkedIn URL and by name +
+   company). Save results as `data/leads/deepline-people-nonalumni-<YYYY-MM-DD>.csv`.
+4. **Emails** exactly like Round D step 4, only for people not already in the queue,
+   batch or sent log, into `data/leads/deepline-emails-nonalumni-<YYYY-MM-DD>.csv`.
+5. **Convert with `--not-alumni`** (they get the plain line "I came across your
+   profile and was genuinely impressed by your work as a <title> at <company>.",
+   which the safety checks already accept):
+   `.venv/bin/outreach from-deepline --not-alumni data/leads/deepline-people-nonalumni-<date>.csv data/leads/deepline-emails-nonalumni-<date>.csv -o data/leads/deepline-nonalumni-<date>.json`
+   If anyone in the results did study at Emory, convert them without `--not-alumni`
+   instead (they should get the Emory line).
+6. `.venv/bin/outreach add data/leads/deepline-nonalumni-<date>.json`
+7. Report it separately from Round D: credits used and left, found / added / skipped.
 
 ## Round 0 — hand-picked people (free, no credits)
 

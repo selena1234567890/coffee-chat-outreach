@@ -982,6 +982,10 @@ def cmd_from_apollo(args, cfg):
 
 EMORY_LINE = ("I noticed you have also studied in Emory and was genuinely impressed by "
               "your work as {article} {title} at {company}.")
+# For people who didn't study at Emory (your choice, 2026-11-10: they fill the day once
+# the Emory alumni run out). Both lines are pre-approved by the safety checks.
+PROFILE_LINE = ("I came across your profile and was genuinely impressed by your work as "
+                "{article} {title} at {company}.")
 LOOKING_WORDS = ("looking for", "open to work", "seeking", "job search", "between roles")
 
 
@@ -1005,9 +1009,10 @@ def moved_reason(headline, company):
     return None
 
 
-def deepline_to_leads(people, emails, cfg):
+def deepline_to_leads(people, emails, cfg, alumni=True):
     """Join a Deepline people search (icypeas_find_people CSV) with its email
-    waterfall results (CSV) into Emory-alumni leads. Returns (leads, skipped)."""
+    waterfall results (CSV) into leads: Emory alumni (the Emory line), or with
+    alumni=False people from anywhere (the plain profile line). Returns (leads, skipped)."""
     by_url = {(e.get("linkedin_url") or "").rstrip("/"): e for e in emails}
     leads, skipped = [], []
     for p in people:
@@ -1033,13 +1038,13 @@ def deepline_to_leads(people, emails, cfg):
             "title": (p.get("lastJobTitle") or "").strip(),
             "contact_email": email,
             "email_status": "verified",
-            "school": "Emory University",
+            "school": "Emory University" if alumni else "",
             "start_date": p.get("lastJobStartDate") or "",
             "linkedin_url": url,
             "source": "deepline",
-            "personal_line": EMORY_LINE.format(
+            "personal_line": (EMORY_LINE if alumni else PROFILE_LINE).format(
                 article="an" if title[:1].lower() in "aeiou" else "a",
-                title=title, company=company),
+                title=title, company=company.rstrip(".")),   # "Inc." -> no double period
             "personal_source": url,
         })
     return leads, skipped
@@ -1053,7 +1058,8 @@ def cmd_from_deepline(args, cfg):
         emails = list(csv.DictReader(open(args.emails, encoding="utf-8")))
     except OSError as e:
         raise SystemExit(f"ERROR: can't read Deepline results: {e}")
-    leads, skipped = deepline_to_leads(people, emails, cfg)
+    leads, skipped = deepline_to_leads(people, emails, cfg,
+                                       alumni=not getattr(args, "not_alumni", False))
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(leads, f, indent=2, ensure_ascii=False)
     print(f"{len(leads)} lead(s) of {len(people)} -> {args.out}")
@@ -1528,6 +1534,8 @@ def main():
             p.add_argument("people", help="Deepline people search results (CSV)")
             p.add_argument("emails", help="Deepline email waterfall results (CSV)")
             p.add_argument("-o", "--out", required=True, help="leads JSON file to write")
+            p.add_argument("--not-alumni", action="store_true",
+                           help="people who didn't study at Emory: plain profile line")
         if name == "approve":
             p.add_argument("emails", nargs="*", help="email address(es) to approve")
             p.add_argument("--all", action="store_true", help="every held email")
