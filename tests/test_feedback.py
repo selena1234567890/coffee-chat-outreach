@@ -84,3 +84,11 @@ def test_credit_warnings():
     assert now[0].startswith("TOP UP DEEPLINE NOW")
     cap = outreach_cli.credit_warnings({"balance": 500.0, "used_30": 20.0, "cap": 25.0}, 13)
     assert "monthly cap almost reached" in cap[0]
+
+
+def test_followups_dont_count_toward_the_new_email_target(tmp_path):
+    rows = [_sent(f"a{i}@g.com") for i in range(10)]
+    rows += [_sent(f"f{i}@g.com", type="followup") for i in range(20)]
+    _, text = _feedback(_setup(tmp_path, rows, run={"sent": 30, "failed": [], "held": 0}))
+    assert "SENT TODAY:                  30 (10 new + 20 follow-ups)" in text
+    assert "3 short of today's target of 13 new emails" in text

@@ -237,26 +237,32 @@ def cmd_stage(args, cfg):
             print(f"Paused after a warning sign until {ramp['paused_until']}. "
                   "See `outreach health`.")
             return
+        # The day's number is NEW emails; every due follow-up goes on top (your
+        # choice, 2026-11-10: 35 new plus follow-ups).
         day_total = ramp["per_day"]
         daily = common.split_daily(daily, day_total)
-        room = day_total - len(todays)
+        new_so_far = sum(not _is_followup(r) for r in todays)
+        room = day_total - new_so_far
         n = room if args.n is None else min(args.n, room)
-        print(f"Ramp step {ramp['step'] + 1}: {day_total} emails today "
-              f"({len(todays)} already staged or sent).")
+        print(f"Ramp step {ramp['step'] + 1}: {day_total} new emails today plus every "
+              f"follow-up that's due ({new_so_far} new already staged or sent).")
     else:
         day_total = sum(daily.values())
         n = args.n if args.n is not None else cfg["pacing"]["batch_size"]
-    if n <= 0:
-        print("Nothing to do: today's limit is reached.")
-        return
 
     if getattr(args, "no_followups", False):
         followups = []
         print("Follow-ups skipped today: the Gmail reply check didn't finish, so we "
               "can't be sure who replied. New people fill the batch instead.")
+    elif ramp_on:
+        followups = due_followups(sent_rows, db_rows, cfg)
     else:
-        followups = due_followups(sent_rows, db_rows, cfg)[:n]
-    n -= len(followups)
+        followups = due_followups(sent_rows, db_rows, cfg)[:max(n, 0)]
+        n -= len(followups)
+    n = max(n, 0)
+    if n == 0 and not followups:
+        print("Nothing to do: today's limit is reached.")
+        return
     if not q_rows and not followups:
         print("Queue is empty (header only). Run `find` + the contact finder to refill.")
         return
@@ -276,8 +282,11 @@ def cmd_stage(args, cfg):
                                     if not _is_followup(r))
     # Tier shares are of today's NEW emails (follow-ups don't take a tier's share).
     new_today = sum(used_tier.values())
-    followups_today = len(todays) - new_today + len(followups)
-    tier_cap = common.tier_caps(cfg, min(n + new_today, day_total - followups_today))
+    if ramp_on:
+        tier_cap = common.tier_caps(cfg, n + new_today)
+    else:
+        followups_today = len(todays) - new_today + len(followups)
+        tier_cap = common.tier_caps(cfg, min(n + new_today, day_total - followups_today))
 
     def prepared(r):
         out = dict(r, type=common.pick_type(r, cfg), tier=str(common.company_tier(r, cfg)))
@@ -1202,6 +1211,8 @@ def build_feedback(cfg, today=None, credits=None, now=None):
     held = _safe_rows(cfg["files"]["held"])[1]
     queued = len(_safe_rows(queue)[1])
     sent_n = sum(_sent_today(r, today) for r in sent_rows)  # every email Gmail sent today
+    fu_n = sum(_sent_today(r, today) and _is_followup(r) for r in sent_rows)
+    new_n = sent_n - fu_n   # the target counts new emails; follow-ups go on top
     failed_n = len((run or {}).get("failed") or [])
 
     needs, good = [], []
@@ -1219,11 +1230,13 @@ def build_feedback(cfg, today=None, credits=None, now=None):
                     + (f", {hiring} to companies hiring interns." if sent_today else "."))
         if run.get("failed"):
             needs.append(f"{len(run['failed'])} failed to send: " + ", ".join(run["failed"]))
-        short = per_day - sent_n - len(held) - failed_n
+        held_new = sum(not _is_followup(r) for r in held)
+        short = per_day - new_n - held_new - failed_n
         if short > 0 and not ramp["paused_until"]:
-            needs.append(f"{short} short of today's target of {per_day}: not enough people "
-                         "were ready (queue ran out, or the rest are at companies already "
-                         "at their limit). The contact finder needs to add more.")
+            needs.append(f"{short} short of today's target of {per_day} new emails: not "
+                         "enough people were ready (queue ran out, or the rest are at "
+                         "companies already at their limit). The contact finder needs to "
+                         "add more.")
     if ramp["paused_until"]:
         needs.append(f"Sending is paused until {ramp['paused_until']} (a warning sign).")
     if bounced_today:
@@ -1246,8 +1259,8 @@ def build_feedback(cfg, today=None, credits=None, now=None):
                     "the contact finder checks 15 a day.")
 
     lines = [f"Outreach daily report, {today:%a %b %-d}", "",
-             f"TODAY'S TARGET:              {per_day}",
-             f"SENT TODAY:                  {sent_n}",
+             f"TODAY'S TARGET:              {per_day} new emails, plus follow-ups",
+             f"SENT TODAY:                  {sent_n} ({new_n} new + {fu_n} follow-ups)",
              f"HELD, WAITING FOR YOUR REVIEW: {len(held)}",
              f"BOUNCED TODAY (bad address): {len(bounced_today)}",
              f"FAILED TO SEND:              {failed_n}",

@@ -161,16 +161,28 @@ def test_followup_wait_is_adjustable(tmp_path):
     assert len(outreach_cli.due_followups([_sent("a@a.com", 2)], [], cfg, today=TODAY)) == 1
 
 
-def test_followups_are_staged_first_and_count_toward_today(tmp_path):
+def test_followups_are_staged_first_on_top_of_the_new_emails(tmp_path):
     cfg = _stage_cfg(tmp_path)
     sent = [_sent(f"old{i}@a.com", 30) for i in range(3)]
     queue = ([_person(f"sr{i}@a.com", title="Engineering Manager") for i in range(25)]
              + [_person(f"jr{i}@a.com") for i in range(25)])
     staged = _stage(cfg, queue, sent=sent)
     assert [r["type"] for r in staged[:3]] == ["followup"] * 3
-    # the first send was 30 days ago, so the ramp is at 35/day; 3 of them are follow-ups
-    assert len(staged) == 35
-    assert sum(r["type"] != "followup" for r in staged) == 32
+    # the first send was 30 days ago, so the ramp is at 35/day: 35 NEW emails, and the
+    # 3 follow-ups go on top (your choice, 2026-11-10)
+    assert sum(r["type"] != "followup" for r in staged) == 35
+    assert len(staged) == 38
+
+
+def test_followups_sent_today_dont_use_up_the_new_emails(tmp_path):
+    cfg = _stage_cfg(tmp_path)
+    old = [_sent(f"old{i}@a.com", 30) for i in range(3)]
+    now = _utc(datetime.date.today())        # "sent today" means the real today
+    fu_today = [_person(f"old{i}@a.com", type="followup", sent_at=now) for i in range(3)]
+    new_today = [_person(f"n{i}@b.com", type="referral", sent_at=now) for i in range(5)]
+    queue = [_person(f"jr{i}@a.com") for i in range(50)]
+    staged = _stage(cfg, queue, sent=old + fu_today + new_today)
+    assert sum(r["type"] != "followup" for r in staged) == 30   # 35 - the 5 new sent today
 
 
 # --- sending ---------------------------------------------------------------------
